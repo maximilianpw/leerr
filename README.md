@@ -118,4 +118,16 @@ On a real iPhone and Mac, a user can discover or search for an album that is not
 
 ## Development status
 
-Leerr is in product and technical discovery. The repository does not yet contain an Xcode project. Building and testing the native applications requires Xcode on macOS and real-device validation for background playback and media controls.
+Leerr has an initial architecture and development scaffold: a shared Swift 6 package, endpoint-policy tests, and SwiftUI app shells for iPhone and macOS. Navidrome connectivity, playback, acquisition, and discovery are not implemented yet.
+
+- [Architecture and implementation gates](docs/architecture.md)
+- [Development setup and device-validation checklist](docs/development.md)
+
+On a Mac with Xcode 16.2+ and XcodeGen installed:
+
+```sh
+./scripts/check
+open Leerr.xcodeproj
+```
+
+The check script runs package tests and generates/builds both app targets. On Linux with Swift installed it runs core tests only. The generated Xcode project is not committed; edit `project.yml` instead. Native builds and visual checks require macOS; background playback, stream quality and media controls require real-device validation.

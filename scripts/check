@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+swift test
+
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo "Core tests only: app builds require macOS and Xcode."
+    exit 0
+fi
+
+xcodegen generate
+xcodebuild -project Leerr.xcodeproj -scheme Leerr-macOS \
+    -destination 'platform=macOS' -derivedDataPath DerivedData \
+    CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project Leerr.xcodeproj -scheme Leerr-iOS \
+    -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData \
+    CODE_SIGNING_ALLOWED=NO build
