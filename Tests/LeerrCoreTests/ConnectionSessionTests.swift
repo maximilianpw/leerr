@@ -56,3 +56,18 @@ private actor DelayedConnection: MusicServer {
     #expect(session.errorMessage == "Could not connect. Check the HTTPS address and credentials, then retry.")
     #expect(session.server == nil)
 }
+
+@Test @MainActor func preCancelledConnectionCannotDisconnectActiveAccount() async {
+    let session = ConnectionSession(), active = DelayedConnection(), canceled = DelayedConnection()
+    let connect = Task { await session.connect(to: active) }
+    while !(await active.started) { await Task.yield() }
+    await active.finish()
+    #expect(await connect.value)
+    let attempt = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return await session.connect(to: canceled)
+    }
+    #expect(!(await attempt.value))
+    #expect(session.server as? DelayedConnection === active)
+    #expect(!(await canceled.started))
+}

@@ -11,11 +11,13 @@ final class PlaybackController {
     let audio = AudioPlayer()
     private(set) var queue = PlaybackQueue()
     private(set) var errorMessage: String?
+    /// Includes buffering/preparation so the UI can pause a pending play intent.
+    var isPlaybackRequested: Bool { wantsPlayback }
 
     @ObservationIgnored private var server: (any MusicServer)?
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
-    @ObservationIgnored private var wantsPlayback = false
+    private var wantsPlayback = false
     @ObservationIgnored private var interrupted = false
     @ObservationIgnored private var resumeAfterInterruption = false
     @ObservationIgnored private var registrations: PlaybackRegistrations?
@@ -99,7 +101,7 @@ final class PlaybackController {
 
     func retry() async {
         guard queue.current != nil, server != nil else { return }
-        await loadCurrent()
+        await loadCurrent(resumeAt: audio.position)
     }
 
     func play() {
@@ -140,7 +142,7 @@ final class PlaybackController {
         updateNowPlaying()
     }
 
-    private func loadCurrent() async {
+    private func loadCurrent(resumeAt: TimeInterval? = nil) async {
         guard let track = queue.current, let server else { return }
         loadTask?.cancel()
         audio.stop()
@@ -169,6 +171,7 @@ final class PlaybackController {
             updateNowPlaying()
             return
         }
+        if let resumeAt, audio.errorMessage == nil { audio.seek(to: resumeAt) }
         if audio.errorMessage == nil, wantsPlayback, !interrupted { play() }
         updateNowPlaying()
     }

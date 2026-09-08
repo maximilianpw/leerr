@@ -21,6 +21,7 @@ public final class AudioPlayer {
     @ObservationIgnored private var formatTask: Task<Void, Never>?
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored private var pendingSeek: (item: AVPlayerItem, seconds: TimeInterval)?
 
     public init() {}
 
@@ -121,13 +122,20 @@ public final class AudioPlayer {
     }
 
     public func seek(to seconds: TimeInterval) {
-        guard seconds.isFinite, player.currentItem?.status == .readyToPlay else { return }
-        let target = max(0, duration > 0 ? min(seconds, duration) : seconds)
+        guard seconds.isFinite, let item = player.currentItem, item.status != .failed else { return }
+        guard item.status == .readyToPlay else {
+            pendingSeek = (item, seconds)
+            return
+        }
+        pendingSeek = nil
+        let length = item.duration.seconds
+        let target = max(0, length.isFinite && length > 0 ? min(seconds, length) : seconds)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
     }
 
     public func stop() {
         generation = UUID()
+        pendingSeek = nil
         urlTask?.cancel()
         urlTask = nil
         formatTask?.cancel()
@@ -155,6 +163,15 @@ public final class AudioPlayer {
         if seconds.isFinite { position = max(0, seconds) }
         let length = item.duration.seconds
         if length.isFinite && length > 0 { duration = length }
+        if let pendingSeek {
+            if pendingSeek.item !== item || item.status == .failed {
+                self.pendingSeek = nil
+            } else if item.status == .readyToPlay {
+                // Consume before issuing the seek; repeated refreshes cannot replay it.
+                self.pendingSeek = nil
+                seek(to: pendingSeek.seconds)
+            }
+        }
         if item.status == .failed {
             player.pause()
             isPlaying = false
