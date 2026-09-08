@@ -19,6 +19,11 @@ targets:
     platform: iOS
     sources:
       - Apps/Leerr
+    info:
+      path: .build/Leerr-iOS-Info.plist
+      properties:
+        UIBackgroundModes: [audio]
+        NSLocalNetworkUsageDescription: Connect to your music server on your local network.
     dependencies:
       - package: Leerr
         product: LeerrCore
