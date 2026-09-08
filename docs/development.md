@@ -16,8 +16,21 @@ open Leerr.xcodeproj
 ```
 
 Select `Leerr-iOS` and an installed iPhone simulator, or `Leerr-macOS` and My Mac,
-then Run. Both currently show an honest non-interactive setup screen: there is
-no connection, library or player yet. Inspect this screen on both platforms.
+then Run. Start in **Connect**, enter a valid HTTPS Navidrome address and account,
+then browse/search **Library**, open an album and select a track. Credentials are
+stored in Keychain only after a successful ping. Disconnect before changing
+accounts; **Forget saved credentials** removes this configuration's Keychain items.
+The app does not silently reconnect on launch.
+
+For **Discover**, enter a Last.fm username/API key. Recommendations use top artists,
+similar artists and their album catalogs. For acquisition, enter a Lidarr HTTPS
+address/API key, load and explicitly choose the root folder and both profiles,
+then enable requests. Choose a resolved release group and edition and confirm the
+artist/edition before requesting. **Requests** refreshes acquisition and indexing
+while the app is active; imported is not yet available. Profile selections must be
+chosen again after disconnect/relaunch. No background polling guarantee is made.
+
+Inspect all these states on both platforms using the checklist below.
 `scripts/check` runs package tests and unsigned builds for both targets; it
 does not launch an app or validate audio behavior.
 
@@ -97,3 +110,31 @@ provision a Navidrome/Lidarr server or change existing music directories.
 
 See [architecture](architecture.md) for ownership, security policy and subsequent
 implementation gates. Unit tests alone do not pass the audio milestone.
+
+## Native UI acceptance checklist — not yet executed
+
+On both iPhone and Mac, record OS/device, exact local revision and inspect captures:
+
+- Connect: blank inputs, invalid HTTPS, wrong credentials, unavailable server,
+  retry, cancel during ping, successful connection, Keychain restore/delete.
+- Library: loading, empty, paginated and duplicate pages, search including rapid
+  replacement, album tracks, error/retry. Disconnect during suspended requests;
+  reconnect to an account reusing remote IDs and verify no stale title/track survives.
+- Mac windows: open different albums in two windows, verify independent track
+  lists and a single shared player/queue and media-command registration.
+- Player: preparing/buffering pause, playing/paused, seek, next/previous, queue
+  end, unsupported/range/redirect errors and explicit retry. Inspect source,
+  delivered and unknown quality text without conflating hardware output.
+- Discovery: missing/stale MusicBrainz IDs, ambiguous groups, edition pagination,
+  exact IDs in the confirmation sheet, owned/requested exclusions, no results,
+  rate-limit/network failures, and account changes. Name-only matches never write.
+- Requests: settings/profile validation, confirmation cancel, duplicate tap,
+  uncertain add/search, failed search with explicit retry, restart/reconcile,
+  imported-but-not-indexed, indexed play.
+  Verify another account cannot see the first account's request history.
+- Dynamic Type, VoiceOver labels, keyboard navigation on Mac, compact iPhone
+  width, light/dark appearance and visible error text without secret-bearing URLs.
+
+Physical audio and real network checks are defined separately in
+[lossless acceptance](lossless-acceptance.md). Native rendering is not verified
+by Linux syntax parsing or by the fixture suite.

@@ -7,6 +7,11 @@ On 8 September 2026, project-scoped and text issue searches returned no Leerr
 issues; the project has no milestones or linked resources. The sequence below
 is a proposed local backlog, not a replacement for any inaccessible issues.
 
+That search describes the scaffold preflight. The seven implementation stages
+now have Linear issues and local implementations; see
+[current evidence and remaining gates](implementation-status.md). The baseline
+contracts below still apply, but future-tense ownership entries are historical.
+
 ## Native clients, no companion backend
 
 Use Swift 6, SwiftUI, iOS 17+ and macOS 14+. These deployment floors permit
