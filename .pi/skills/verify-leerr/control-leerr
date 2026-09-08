@@ -1,0 +1,503 @@
+#!/usr/bin/env bash
+# Drive a disposable Leerr instance for verification. See SKILL.md.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SWIFT_SRC="$SCRIPT_DIR/helpers/LeerrUI.swift"
+LEERR_ROOT=${LEERR_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
+LEERR_VERIFY_DIR=${LEERR_VERIFY_DIR:-}
+
+MACOS_BUNDLE_ID="dev.leerr.macos"
+IOS_BUNDLE_ID="dev.leerr.ios"
+MACOS_WINDOW_NAME="Leerr"
+IOS_SIM_PREFIX="Leerr Verify"
+
+usage() {
+    cat <<'EOF'
+usage: control-leerr <command>
+
+commands:
+  launch macos|ios   Build and start an isolated Leerr instance
+  doctor             Check that the instance in LEERR_VERIFY_DIR is safe to drive
+  windows            List on-screen CG windows for the macOS instance pid
+  screenshot [path]  Capture the instance window (macOS) or simulator (iOS)
+  ocr [path]         OCR a screenshot; pass --contains <text> after the path
+  capture [prefix]   Screenshot + OCR to evidence/<prefix>.png and .ocr.txt
+  stop               Stop the instance this run started
+  cleanup            stop, then delete instance/ (evidence/ is kept)
+
+environment:
+  LEERR_VERIFY_DIR   Required. Unique dir, e.g. /tmp/leerr-verify-$RUN_ID
+  LEERR_ROOT         Repo root (default: three levels above this script)
+EOF
+}
+
+realpath_path() {
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+require_verify_dir() {
+    if [[ -z "${LEERR_VERIFY_DIR}" ]]; then
+        echo "control-leerr: set LEERR_VERIFY_DIR to a unique directory (e.g. /tmp/leerr-verify-\$RUN_ID)" >&2
+        exit 2
+    fi
+    mkdir -p "$LEERR_VERIFY_DIR"
+    LEERR_VERIFY_DIR=$(realpath_path "$LEERR_VERIFY_DIR")
+    INSTANCE_DIR="$LEERR_VERIFY_DIR/instance"
+    EVIDENCE_DIR="$LEERR_VERIFY_DIR/evidence"
+    STATE_FILE="$INSTANCE_DIR/state"
+    UI_BIN="$INSTANCE_DIR/leerr-ui"
+    mkdir -p "$INSTANCE_DIR" "$EVIDENCE_DIR"
+}
+
+require_darwin() {
+    if [[ "$(uname -s)" != Darwin ]]; then
+        echo "control-leerr: native Leerr verification requires macOS with Xcode" >&2
+        exit 1
+    fi
+}
+
+load_state() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "control-leerr: no instance state at $STATE_FILE (run launch first)" >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+}
+
+write_state() {
+    cat >"$STATE_FILE" <<EOF
+PLATFORM=$PLATFORM
+PID=${PID:-}
+APP=${APP:-}
+EXEC=${EXEC:-}
+BUNDLE_ID=$BUNDLE_ID
+VERSION=${VERSION:-}
+UDID=${UDID:-}
+SIM_CREATED=${SIM_CREATED:-0}
+SIM_NAME=${SIM_NAME:-}
+EOF
+}
+
+ensure_ui() {
+    if [[ ! -x "$UI_BIN" || "$SWIFT_SRC" -nt "$UI_BIN" ]]; then
+        swiftc -parse-as-library -O -o "$UI_BIN" "$SWIFT_SRC" -framework AppKit -framework Vision
+    fi
+}
+
+plist_value() {
+    local app=$1 key=$2
+    /usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Print :$key" "$app/Info.plist"
+}
+
+process_alive() {
+    local pid=$1
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+macos_exec_matches() {
+    local pid=$1 expected=$2
+    local actual
+    actual=$(ps -p "$pid" -o command= 2>/dev/null | awk '{print $1}')
+    [[ -n "$actual" && "$(realpath_path "$actual")" == "$(realpath_path "$expected")" ]]
+}
+
+wait_for_macos_pid() {
+    local exec_path=$1
+    local i pid
+    for i in $(seq 1 50); do
+        pid=$(pgrep -f "$exec_path" | head -n1 || true)
+        if [[ -n "$pid" ]] && macos_exec_matches "$pid" "$exec_path"; then
+            echo "$pid"
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "control-leerr: timed out waiting for $exec_path" >&2
+    return 1
+}
+
+wait_for_macos_window() {
+    local pid=$1
+    local i
+    ensure_ui
+    for i in $(seq 1 50); do
+        if "$UI_BIN" windows --pid "$pid" 2>/dev/null | grep -q "name=$MACOS_WINDOW_NAME "; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "control-leerr: timed out waiting for a window named $MACOS_WINDOW_NAME on pid $pid" >&2
+    return 1
+}
+
+macos_window_id() {
+    local pid=$1
+    ensure_ui
+    "$UI_BIN" windows --pid "$pid" | awk -v name="$MACOS_WINDOW_NAME" '
+        $0 ~ "name=" name " " && $0 ~ /layer=0 / {
+            for (i = 1; i <= NF; i++) if ($i ~ /^id=/) { sub(/^id=/, "", $i); print $i; exit }
+        }'
+}
+
+generate_project() {
+    if ! command -v xcodegen >/dev/null; then
+        echo "control-leerr: xcodegen is required. Install with: brew install xcodegen" >&2
+        exit 1
+    fi
+    (cd "$LEERR_ROOT" && xcodegen generate)
+}
+
+build_macos() {
+    generate_project
+    xcodebuild -quiet -project "$LEERR_ROOT/Leerr.xcodeproj" -scheme Leerr-macOS \
+        -destination 'platform=macOS' \
+        -derivedDataPath "$INSTANCE_DIR/DerivedData" \
+        -configuration Debug \
+        build
+    APP=$(realpath_path "$INSTANCE_DIR/DerivedData/Build/Products/Debug/Leerr-macOS.app")
+    EXEC=$(realpath_path "$APP/Contents/MacOS/Leerr-macOS")
+    if [[ ! -x "$EXEC" ]]; then
+        echo "control-leerr: expected executable missing: $EXEC" >&2
+        exit 1
+    fi
+}
+
+build_ios() {
+    local udid=$1
+    generate_project
+    xcodebuild -quiet -project "$LEERR_ROOT/Leerr.xcodeproj" -scheme Leerr-iOS \
+        -destination "platform=iOS Simulator,id=$udid" \
+        -derivedDataPath "$INSTANCE_DIR/DerivedData" \
+        -configuration Debug \
+        build
+    APP=$(realpath_path "$INSTANCE_DIR/DerivedData/Build/Products/Debug-iphonesimulator/Leerr-iOS.app")
+    if [[ ! -d "$APP" ]]; then
+        echo "control-leerr: expected simulator app missing: $APP" >&2
+        exit 1
+    fi
+}
+
+pick_ios_runtime() {
+    xcrun simctl list runtimes available | awk -F'[()]' '/iOS/{id=$2} END{print id}'
+}
+
+pick_ios_device_type() {
+    if xcrun simctl list devicetypes available | grep -q 'iPhone 17 '; then
+        echo "iPhone 17"
+    elif xcrun simctl list devicetypes available | grep -q 'iPhone 16 '; then
+        echo "iPhone 16"
+    else
+        xcrun simctl list devicetypes available | awk -F'[()]' '/iPhone/{print $1; exit}' | sed 's/[[:space:]]*$//'
+    fi
+}
+
+create_ios_simulator() {
+    local run_id name device runtime udid
+    run_id=$(basename "$LEERR_VERIFY_DIR")
+    name="$IOS_SIM_PREFIX $run_id"
+    device=$(pick_ios_device_type)
+    runtime=$(pick_ios_runtime)
+    if [[ -z "$device" || -z "$runtime" ]]; then
+        echo "control-leerr: could not pick an iOS Simulator device/runtime" >&2
+        exit 1
+    fi
+    udid=$(xcrun simctl create "$name" "$device" "$runtime")
+    echo "$udid $name"
+}
+
+sim_booted() {
+    local udid=$1
+    xcrun simctl list devices | grep -F "$udid" | grep -q Booted
+}
+
+ios_app_pid() {
+    local udid=$1
+    xcrun simctl spawn "$udid" launchctl list 2>/dev/null | awk -v id="$IOS_BUNDLE_ID" '$3 == id {print $1; exit}'
+}
+
+launch_macos() {
+    require_darwin
+    require_verify_dir
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        if [[ "${PLATFORM:-}" == macos ]] && process_alive "${PID:-}" && macos_exec_matches "$PID" "$EXEC"; then
+            doctor
+            return 0
+        fi
+        if [[ -n "${EXEC:-}" ]]; then
+            pgrep -f "$EXEC" | while read -r leftover; do
+                if macos_exec_matches "$leftover" "$EXEC"; then
+                    kill "$leftover" 2>/dev/null || true
+                fi
+            done
+        fi
+    fi
+    build_macos
+    VERSION=$(plist_value "$APP" CFBundleShortVersionString)
+    BUNDLE_ID=$(plist_value "$APP" CFBundleIdentifier)
+    if [[ "$BUNDLE_ID" != "$MACOS_BUNDLE_ID" ]]; then
+        echo "control-leerr: unexpected bundle id $BUNDLE_ID (want $MACOS_BUNDLE_ID)" >&2
+        exit 1
+    fi
+    open -n -g "$APP"
+    if ! PID=$(wait_for_macos_pid "$EXEC"); then
+        pgrep -f "$EXEC" | while read -r leftover; do
+            if macos_exec_matches "$leftover" "$EXEC"; then
+                kill "$leftover" 2>/dev/null || true
+            fi
+        done
+        exit 1
+    fi
+    wait_for_macos_window "$PID"
+    PLATFORM=macos
+    UDID=
+    SIM_CREATED=0
+    SIM_NAME=
+    write_state
+    doctor
+}
+
+launch_ios() {
+    require_darwin
+    require_verify_dir
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        if [[ "${PLATFORM:-}" == ios && -n "${UDID:-}" ]] && sim_booted "$UDID"; then
+            if [[ "$(ios_app_pid "$UDID")" != "-" && -n "$(ios_app_pid "$UDID")" ]]; then
+                doctor
+                return 0
+            fi
+        fi
+    fi
+    local created
+    created=$(create_ios_simulator)
+    UDID=${created%% *}
+    SIM_NAME=${created#* }
+    SIM_CREATED=1
+    xcrun simctl boot "$UDID"
+    xcrun simctl bootstatus "$UDID" -b
+    build_ios "$UDID"
+    xcrun simctl install "$UDID" "$APP"
+    local launch_out
+    launch_out=$(xcrun simctl launch "$UDID" "$IOS_BUNDLE_ID")
+    PID=${launch_out##*: }
+    PID=${PID//[[:space:]]/}
+    VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
+    BUNDLE_ID=$IOS_BUNDLE_ID
+    EXEC=
+    PLATFORM=ios
+    write_state
+    sleep 1
+    doctor
+}
+
+doctor() {
+    require_darwin
+    require_verify_dir
+    load_state
+    echo "verify_dir=$LEERR_VERIFY_DIR"
+    echo "platform=$PLATFORM"
+    echo "bundle_id=$BUNDLE_ID"
+    echo "version=$VERSION"
+    echo "app=$APP"
+    case "$PLATFORM" in
+        macos)
+            if ! process_alive "$PID"; then
+                echo "doctor: pid $PID is not running" >&2
+                exit 1
+            fi
+            if ! macos_exec_matches "$PID" "$EXEC"; then
+                echo "doctor: pid $PID is not $EXEC (refusing to drive a foreign Leerr)" >&2
+                exit 1
+            fi
+            if [[ "$BUNDLE_ID" != "$MACOS_BUNDLE_ID" ]]; then
+                echo "doctor: bundle id $BUNDLE_ID is not $MACOS_BUNDLE_ID" >&2
+                exit 1
+            fi
+            local wid
+            wid=$(macos_window_id "$PID")
+            if [[ -z "$wid" ]]; then
+                echo "doctor: no on-screen window named $MACOS_WINDOW_NAME for pid $PID" >&2
+                exit 1
+            fi
+            echo "pid=$PID"
+            echo "exec=$EXEC"
+            echo "window_id=$wid"
+            echo "window_name=$MACOS_WINDOW_NAME"
+            echo "ok=true"
+            ;;
+        ios)
+            if [[ -z "$UDID" ]]; then
+                echo "doctor: missing simulator UDID in state" >&2
+                exit 1
+            fi
+            if ! xcrun simctl list devices | grep -qF "$UDID"; then
+                echo "doctor: simulator $UDID does not exist" >&2
+                exit 1
+            fi
+            if ! sim_booted "$UDID"; then
+                echo "doctor: simulator $UDID is not Booted" >&2
+                exit 1
+            fi
+            if [[ "$SIM_CREATED" != 1 ]]; then
+                echo "doctor: refusing to drive a simulator this run did not create" >&2
+                exit 1
+            fi
+            if ! xcrun simctl get_app_container "$UDID" "$IOS_BUNDLE_ID" app >/dev/null 2>&1; then
+                echo "doctor: $IOS_BUNDLE_ID is not installed on $UDID" >&2
+                exit 1
+            fi
+            local app_pid
+            app_pid=$(ios_app_pid "$UDID")
+            if [[ -z "$app_pid" || "$app_pid" == "-" ]]; then
+                echo "doctor: $IOS_BUNDLE_ID is not running on $UDID" >&2
+                exit 1
+            fi
+            echo "udid=$UDID"
+            echo "sim_name=$SIM_NAME"
+            echo "pid=$app_pid"
+            echo "ok=true"
+            ;;
+        *)
+            echo "doctor: unknown PLATFORM=$PLATFORM" >&2
+            exit 1
+            ;;
+    esac
+}
+
+windows_cmd() {
+    require_verify_dir
+    load_state
+    if [[ "$PLATFORM" != macos ]]; then
+        echo "control-leerr: windows is macOS-only" >&2
+        exit 1
+    fi
+    ensure_ui
+    "$UI_BIN" windows --pid "$PID"
+}
+
+screenshot_cmd() {
+    local path=${1:-$EVIDENCE_DIR/screenshot.png}
+    require_verify_dir
+    load_state
+    mkdir -p "$(dirname "$path")"
+    case "$PLATFORM" in
+        macos)
+            local wid
+            wid=$(macos_window_id "$PID")
+            if [[ -z "$wid" ]]; then
+                echo "control-leerr: no window to capture for pid $PID" >&2
+                exit 1
+            fi
+            screencapture -o -l "$wid" "$path"
+            ;;
+        ios)
+            xcrun simctl io "$UDID" screenshot "$path"
+            ;;
+        *)
+            echo "control-leerr: screenshot: unknown platform $PLATFORM" >&2
+            exit 1
+            ;;
+    esac
+    echo "screenshot=$path"
+}
+
+ocr_cmd() {
+    require_verify_dir
+    ensure_ui
+    local path=$EVIDENCE_DIR/screenshot.png
+    local extras=()
+    if [[ $# -gt 0 && "$1" != --* ]]; then
+        path=$1
+        shift
+    fi
+    extras=("$@")
+    "$UI_BIN" ocr --path "$path" "${extras[@]}"
+}
+
+capture_cmd() {
+    require_verify_dir
+    local prefix=${1:-screenshot}
+    local png="$EVIDENCE_DIR/${prefix}.png"
+    local txt="$EVIDENCE_DIR/${prefix}.ocr.txt"
+    shift || true
+    screenshot_cmd "$png" >/dev/null
+    ocr_cmd "$png" "$@" | tee "$txt"
+    echo "screenshot=$png"
+    echo "ocr=$txt"
+}
+
+stop_cmd() {
+    require_verify_dir
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "control-leerr: nothing to stop"
+        return 0
+    fi
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    case "${PLATFORM:-}" in
+        macos)
+            if process_alive "${PID:-}" && macos_exec_matches "$PID" "$EXEC"; then
+                kill "$PID"
+                local i
+                for i in $(seq 1 20); do
+                    process_alive "$PID" || break
+                    sleep 0.1
+                done
+                if process_alive "$PID"; then
+                    kill -9 "$PID" 2>/dev/null || true
+                fi
+            fi
+            ;;
+        ios)
+            if [[ -n "${UDID:-}" ]]; then
+                xcrun simctl terminate "$UDID" "$IOS_BUNDLE_ID" 2>/dev/null || true
+            fi
+            ;;
+    esac
+    echo "stopped=true"
+}
+
+cleanup_cmd() {
+    require_verify_dir
+    stop_cmd
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        if [[ "${PLATFORM:-}" == ios && "${SIM_CREATED:-0}" == 1 && -n "${UDID:-}" ]]; then
+            xcrun simctl shutdown "$UDID" 2>/dev/null || true
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+        fi
+    fi
+    rm -rf "$INSTANCE_DIR"
+    echo "cleanup=instance"
+    echo "evidence=$EVIDENCE_DIR"
+}
+
+cmd=${1:-}
+if [[ $# -gt 0 ]]; then
+    shift
+fi
+case "$cmd" in
+    launch)
+        case "${1:-macos}" in
+            macos) launch_macos ;;
+            ios) launch_ios ;;
+            *) echo "control-leerr: launch macos|ios" >&2; exit 2 ;;
+        esac
+        ;;
+    doctor) doctor ;;
+    windows) windows_cmd ;;
+    screenshot) screenshot_cmd "${1:-}" ;;
+    ocr) ocr_cmd "$@" ;;
+    capture) capture_cmd "$@" ;;
+    stop) stop_cmd ;;
+    cleanup) cleanup_cmd ;;
+    help|--help|-h|"") usage ;;
+    *) usage; exit 2 ;;
+esac
