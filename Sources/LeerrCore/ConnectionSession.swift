@@ -14,6 +14,7 @@ public final class ConnectionSession {
 
     @discardableResult
     public func connect(to candidate: any MusicServer) async -> Bool {
+        guard !Task.isCancelled else { return false }
         disconnect()
         let current = generation
         isConnecting = true
@@ -37,7 +38,8 @@ public final class ConnectionSession {
             isConnecting = false
             attempt = nil
             if !(error is CancellationError) && !Task.isCancelled && !task.isCancelled {
-                errorMessage = "Could not connect. Check the HTTPS address and credentials, then retry."
+                errorMessage = (error as? MusicServerError)?.errorDescription
+                    ?? "Could not connect. Check the HTTPS address and credentials, then retry."
             }
             return false
         }
