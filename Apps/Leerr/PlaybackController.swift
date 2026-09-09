@@ -33,9 +33,9 @@ final class PlaybackController {
         registrations.notifications.append(NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main
         ) { [weak self] notification in
+            guard let item = notification.object as? AVPlayerItem else { return }
             MainActor.assumeIsolated {
-                guard let self, let item = notification.object as? AVPlayerItem,
-                      item === self.audio.player.currentItem else { return }
+                guard let self, item === self.audio.player.currentItem else { return }
                 let generation = self.generation
                 Task { @MainActor [weak self] in
                     guard let self, self.generation == generation, self.wantsPlayback,
@@ -49,14 +49,16 @@ final class PlaybackController {
         registrations.notifications.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
         ) { [weak self] notification in
-            MainActor.assumeIsolated { self?.handleInterruption(notification) }
+            guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
+            let options = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            MainActor.assumeIsolated { self?.handleInterruption(type: type, options: options) }
         })
         registrations.notifications.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
         ) { [weak self] notification in
+            guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
             MainActor.assumeIsolated {
-                guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                      AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
                 self?.pause()
             }
         })
@@ -193,9 +195,8 @@ final class PlaybackController {
     }
 
     #if os(iOS)
-    private func handleInterruption(_ notification: Notification) {
-        guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+    private func handleInterruption(type raw: UInt, options rawOptions: UInt) {
+        guard let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         switch type {
         case .began:
             resumeAfterInterruption = wantsPlayback && audio.isPlaying
@@ -203,7 +204,6 @@ final class PlaybackController {
             audio.pause()
             updateNowPlaying()
         case .ended:
-            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let shouldResume = AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume)
             interrupted = false
             let resume = resumeAfterInterruption && wantsPlayback && shouldResume

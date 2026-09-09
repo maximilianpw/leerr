@@ -38,11 +38,14 @@ private struct SettingsView: View {
             Form {
                 Section("Navidrome") {
                     TextField("HTTPS server address", text: $model.endpoint)
+                        .accessibilityLabel("HTTPS server address")
                         .autocorrectionDisabled()
                         .disabled(model.connection.server != nil || model.connection.isConnecting)
                     TextField("Username", text: $model.username).autocorrectionDisabled()
+                        .accessibilityLabel("Username")
                         .disabled(model.connection.server != nil || model.connection.isConnecting)
                     SecureField("Password", text: $model.password)
+                        .accessibilityLabel("Password")
                         .disabled(model.connection.server != nil || model.connection.isConnecting)
                     if model.connection.server != nil {
                         Label("Connected", systemImage: "checkmark.shield")
@@ -59,16 +62,20 @@ private struct SettingsView: View {
                 }
                 Section("Last.fm discovery") {
                     TextField("Last.fm username", text: $model.lastFMUsername).autocorrectionDisabled()
+                        .accessibilityLabel("Last.fm username")
                         .onChange(of: model.lastFMUsername) { _, _ in model.discoverySettingsChanged() }
                     SecureField("Last.fm API key", text: $model.lastFMKey)
+                        .accessibilityLabel("Last.fm API key")
                         .onChange(of: model.lastFMKey) { _, _ in model.discoverySettingsChanged() }
                     Text("Listening signals are sent to Last.fm. Album identities are resolved through MusicBrainz.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }.disabled(model.isWorking)
                 Section("Lidarr requests") {
                     TextField("Lidarr HTTPS address", text: $model.lidarrEndpoint).autocorrectionDisabled()
+                        .accessibilityLabel("Lidarr HTTPS address")
                         .onChange(of: model.lidarrEndpoint) { _, _ in model.lidarrSettingsChanged() }
                     SecureField("Lidarr API key", text: $model.lidarrKey)
+                        .accessibilityLabel("Lidarr API key")
                         .onChange(of: model.lidarrKey) { _, _ in model.lidarrSettingsChanged() }
                     Button("Load folders and profiles") { model.loadLidarrOptions() }
                         .disabled(model.lidarrKey.isEmpty || model.lidarrEndpoint.isEmpty)

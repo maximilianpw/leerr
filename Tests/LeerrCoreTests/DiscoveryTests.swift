@@ -218,7 +218,11 @@ private actor DiscoveryGate {
 
 @Test func discoveryRejectsInvalidUserAgentAndMalformedIdentity() async throws {
     #expect(throws: DiscoveryError.invalidConfiguration) { try MusicBrainzClient(userAgent: "generic") }
-    #expect(throws: DiscoveryError.invalidConfiguration) { try MusicBrainzClient(userAgent: agent + "\r\nInjected: yes") }
+    for newline in ["\r", "\n", "\r\n"] {
+        #expect(throws: DiscoveryError.invalidConfiguration) {
+            try MusicBrainzClient(userAgent: agent + newline + "Injected: yes")
+        }
+    }
     let mb = try client(DiscoveryFixture { _ in response(#"{"id":"invalid","title":"Album","artist-credit":[]}"#) })
     await #expect(throws: DiscoveryError.invalidResponse) { try await mb.resolve(DiscoveryCandidate(title: "A", artist: "B", identity: .releaseGroup(mbid: groupA))) }
     await #expect(throws: DiscoveryError.invalidConfiguration) { try await mb.releases(releaseGroupMBID: "release/not-an-id") }

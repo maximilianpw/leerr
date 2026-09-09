@@ -37,7 +37,7 @@ public struct MusicBrainzClient: Sendable {
     ) throws {
         guard userAgent.contains("/"), userAgent.contains("("), userAgent.contains(")"),
               userAgent.contains("https://") || userAgent.contains("@"),
-              !userAgent.contains("\r"), !userAgent.contains("\n") else {
+              !userAgent.utf8.contains(13), !userAgent.utf8.contains(10) else {
             throw DiscoveryError.invalidConfiguration
         }
         self.userAgent = userAgent
