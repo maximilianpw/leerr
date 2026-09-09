@@ -9,9 +9,12 @@ Lidarr/discovery or the entire first-version product. Follow the contracts in
 [native testing prerequisites](development.md#prerequisite-for-amp-driven-native-ui-testing).
 The architecture's numbered implementation roadmap is a separate sequence.
 
-Preflight for this document: no live Mac runner was connected; no live server
-credentials were supplied. Real iPhone/Mac execution and live delivery evidence
-are blocked. Neither Linux tests nor a Simulator pass can clear this gate.
+Updated preflight, 9 September 2026: the Mac runner is connected and native
+build/disconnected UI checks passed, as recorded in the
+[native verification report](native-verification-2026-09-09.md). The paired
+physical iPhone is unavailable and no authorized live service credentials or
+delivery-capture setup were supplied. Real-device audio and live delivery
+evidence are blocked. Neither core tests nor a Simulator pass can clear this gate.
 This procedure does not authorize provisioning infrastructure, importing files
 into someone else's library, or changing shared server/transcode settings.
 Use an existing authorized test server/account; obtain permission for writes.

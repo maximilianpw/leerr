@@ -1,10 +1,13 @@
 # Implementation and remaining acceptance gates
 
 The seven stages have local implementations integrated in one checkout. This is
-**not a verified Apple release**: no connected Mac runner, real Apple device or
-configured live service was available. Native SDK typechecking, builds, rendered
-UI and live audio/acquisition acceptance remain open. No code was pushed, no
-deployment was triggered and no shared infrastructure was changed.
+**not a verified Apple release**. On 9 September 2026, the Mac runner passed both
+Apple builds, 86 core tests including actual Mac Keychain operations, and native
+disconnected/error UI checks on Mac and iPhone Simulator. See the
+[native verification report](native-verification-2026-09-09.md) for exact scope.
+Connected UI, real-device audio and live acquisition acceptance remain open.
+No code was pushed, no deployment was triggered and no shared infrastructure
+was changed.
 
 ## Linear tracks implementation separately from acceptance
 
@@ -96,7 +99,7 @@ stub checks composition API/concurrency contracts, **not Apple SDK compatibility
 The stub is not part of the application and is not retained in the repository.
 
 On a connected Mac with the exact unpushed changes, run `./scripts/check`, launch
-both targets, and inspect the [native UI checklist](development.md#native-ui-acceptance-checklist--not-yet-executed).
+both targets, and inspect the [native UI checklist](development.md#native-ui-acceptance-checklist).
 XcodeGen generates `.build/Leerr-iOS-Info.plist` with the background audio array;
 regenerate the project after cleaning `.build`. Verify the built plist and actual
 OS behavior rather than treating configuration as runtime evidence.

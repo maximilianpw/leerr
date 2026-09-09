@@ -111,7 +111,11 @@ provision a Navidrome/Lidarr server or change existing music directories.
 See [architecture](architecture.md) for ownership, security policy and subsequent
 implementation gates. Unit tests alone do not pass the audio milestone.
 
-## Native UI acceptance checklist — not yet executed
+## Native UI acceptance checklist
+
+The [9 September native run](native-verification-2026-09-09.md) covers builds and
+disconnected/error UI on Mac and iPhone Simulator. Connected, playback and live
+acquisition cases below are still unexecuted. No physical iPhone audio gate passed.
 
 On both iPhone and Mac, record OS/device, exact local revision and inspect captures:
 
