@@ -42,7 +42,7 @@ private struct SettingsView: View {
                             Text(kind.name).tag(kind)
                         }
                     }
-                    .accessibilityLabel("Server type")
+                    .accessibilityIdentifier("server-type")
                     .disabled(model.connection.server != nil || model.connection.isConnecting)
                     TextField("HTTPS server address", text: $model.endpoint)
                         .accessibilityLabel("HTTPS server address")
