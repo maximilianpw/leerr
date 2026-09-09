@@ -51,7 +51,7 @@ public struct AcquisitionRequest: Codable, Equatable, Identifiable, Sendable {
     public var isAvailable: Bool { status == .indexed && indexedAlbumID != nil }
 }
 
-/// Implement using authoritative Navidrome metadata, never a title/artist search.
+/// Implement using authoritative music-server metadata, never a title/artist search.
 /// Return nil unless the canonical release-group matches and, when specified,
 /// release matches too. A release-group globally determines artist ownership;
 /// adapters lacking artist MBIDs must not replace that check with fuzzy names.
@@ -61,7 +61,7 @@ public protocol AcquisitionLibrary: Sendable {
 }
 
 /// One store/coordinator per account in the app composition root. accountID must
-/// be an opaque non-secret identifier covering both Navidrome and Lidarr accounts.
+/// be an opaque non-secret identifier covering both music-server and Lidarr accounts.
 /// Atomic versioned JSON replaces a single account file; unsupported/corrupt data
 /// fails closed rather than erasing the write journal. No API keys or
 /// authenticated stream URLs are stored.

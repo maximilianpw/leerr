@@ -41,7 +41,7 @@ public struct Track: Identifiable, Equatable, Sendable {
     }
 }
 
-/// First-slice boundary. OpenSubsonic DTOs and authentication stay in the adapter.
+/// Server DTOs and authentication stay in the OpenSubsonic or Jellyfin adapter.
 /// Cancellation propagates to network requests. An empty page ends enumeration.
 public protocol MusicServer: Sendable {
     func connect() async throws

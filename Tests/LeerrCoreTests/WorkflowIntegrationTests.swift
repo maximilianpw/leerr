@@ -121,7 +121,7 @@ private struct WorkflowImmediateLimiter: MusicBrainzRequestLimiting {
     let navFixture = WorkflowHTTPFixture(navSteps)
     let server = OpenSubsonicServer(endpoint: try ServerEndpoint("https://navidrome.example.test/navidrome"),
         username: "fixture-user", password: "fixture-only", transport: WorkflowNavidromeTransport(fixture: navFixture))
-    let library = NavidromeAcquisitionLibrary(server: server) { release in
+    let library = IndexedMusicLibrary(server: server) { release in
         try await musicBrainz.releaseGroup(forReleaseMBID: release)?.id
     }
     let rawAlbums = try await server.albums(offset: 0, limit: 50)

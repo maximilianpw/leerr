@@ -9,6 +9,14 @@ Connected UI, real-device audio and live acquisition acceptance remain open.
 No code was pushed, no deployment was triggered and no shared infrastructure
 was changed.
 
+Jellyfin is now implemented as an alternative music server under
+[PRS-331](https://linear.app/maxpw/issue/PRS-331), without requiring Navidrome.
+Provider selection, native authentication, paginated music browsing, source
+metadata and static original-stream URLs share the existing playback/workflow
+interfaces. `IndexedMusicLibrary` preserves Jellyfin release/group IDs and
+resolves edition-only tags as needed. The earlier native report predates this
+addition; it is not evidence of Jellyfin login or playback against a live server.
+
 ## Linear tracks implementation separately from acceptance
 
 | Stage | Acceptance-gated issue | Fixture/procedure subissue |
@@ -111,5 +119,5 @@ recovery. Finally exercise the complete native Last.fm → MusicBrainz → Lidar
 Navidrome → playback flow against authorized test services. Keep credentials,
 authenticated URLs and private listening history out of screenshots and reports.
 
-Offline downloads, Jellyfin, scrobbling, advanced audio output and a companion
+Offline downloads, scrobbling, advanced audio output and a companion
 backend remain outside this implementation scope.

@@ -12,6 +12,29 @@ now have Linear issues and local implementations; see
 [current evidence and remaining gates](implementation-status.md). The baseline
 contracts below still apply, but future-tense ownership entries are historical.
 
+## Jellyfin is an alternative, not an additional required server
+
+`MusicServerKind` selects Jellyfin or Navidrome at the composition root. Fresh
+setups default to Jellyfin; existing Navidrome endpoint/Keychain/journal keys
+remain compatible. Switching providers disconnects, cancels work and clears
+library/player/discovery state before loading that provider's saved credentials.
+Jellyfin journals include the provider in their scope, so opaque remote IDs never
+cross into a Navidrome account at the same address.
+
+Jellyfin's adapter uses `/Users/AuthenticateByName`, user-scoped `/Items` music
+queries and `/Audio/{id}/stream?static=true`. Login POSTs never follow redirects;
+metadata GETs retain the same-origin HTTPS rule. Tokens are in-memory only and
+authenticated stream URLs retain the existing no-logging/no-storage rule. The
+player still requires HTTP 206 ranges and rejects all media redirects. Static
+stream parameters are intent, not proof of delivery or Apple codec support.
+
+`IndexedMusicLibrary` is shared by both providers. Explicit release-group tags
+avoid MusicBrainz lookups; edition-only tags use the existing lookup/cache.
+Jellyfin `MusicBrainzAlbum` is a release ID and `MusicBrainzReleaseGroup` a group
+ID. Exact edition and indexed availability checks never fall back to names.
+No Jellyfin library creation, scan trigger, transcoding configuration or backend
+is introduced. Live playback must be checked against the user's chosen server.
+
 ## Native clients, no companion backend
 
 Use Swift 6, SwiftUI, iOS 17+ and macOS 14+. These deployment floors permit

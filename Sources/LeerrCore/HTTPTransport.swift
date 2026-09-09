@@ -79,8 +79,9 @@ public struct URLSessionHTTPTransport: HTTPTransport {
         }
     }
 
-    static func permitsRedirect(from source: URL, to target: URL) -> Bool {
-        source.scheme?.lowercased() == "https" && target.scheme?.lowercased() == "https"
+    static func permitsRedirect(from source: URL, to target: URL, method: String = "GET") -> Bool {
+        (method == "GET" || method == "HEAD")
+            && source.scheme?.lowercased() == "https" && target.scheme?.lowercased() == "https"
             && source.host?.lowercased() == target.host?.lowercased()
             && (source.port ?? 443) == (target.port ?? 443)
             && target.user == nil && target.password == nil
@@ -93,7 +94,8 @@ private final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         guard let source = task.originalRequest?.url, let target = request.url,
-              URLSessionHTTPTransport.permitsRedirect(from: source, to: target) else {
+              URLSessionHTTPTransport.permitsRedirect(from: source, to: target,
+                  method: task.originalRequest?.httpMethod ?? "GET") else {
             completionHandler(nil)
             return
         }

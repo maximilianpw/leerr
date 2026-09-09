@@ -36,7 +36,14 @@ private struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Navidrome") {
+                Section("Music server") {
+                    Picker("Server type", selection: Binding(get: { model.serverKind }, set: { model.selectServer($0) })) {
+                        ForEach(MusicServerKind.allCases, id: \.self) { kind in
+                            Text(kind.name).tag(kind)
+                        }
+                    }
+                    .accessibilityLabel("Server type")
+                    .disabled(model.connection.server != nil || model.connection.isConnecting)
                     TextField("HTTPS server address", text: $model.endpoint)
                         .accessibilityLabel("HTTPS server address")
                         .autocorrectionDisabled()
@@ -59,6 +66,10 @@ private struct SettingsView: View {
                     if let error = model.connection.errorMessage { Text(error).foregroundStyle(.red) }
                     Text("Valid HTTPS is required. Credentials stay in Keychain; no certificate bypass.")
                         .font(.footnote).foregroundStyle(.secondary)
+                    if model.serverKind == .jellyfin {
+                        Text("Use your Jellyfin server address and user login. Your account needs access to a Music library. Navidrome is not required.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Last.fm discovery") {
                     TextField("Last.fm username", text: $model.lastFMUsername).autocorrectionDisabled()
@@ -122,7 +133,7 @@ private struct LibraryView: View {
             List {
                 if model.connection.server == nil {
                     ContentUnavailableView("Connect to your library", systemImage: "music.note.house",
-                        description: Text("Open Connect to configure Navidrome."))
+                        description: Text("Open Connect to configure Jellyfin or Navidrome."))
                 } else {
                     ForEach(model.library.albums) { album in
                         NavigationLink {
@@ -271,9 +282,9 @@ private struct RequestsView: View {
                         AlbumLabel(title: request.identity.title, artist: request.identity.artist)
                         Text(request.status.rawValue.capitalized).font(.subheadline)
                         if request.isAvailable {
-                            Button("Play from Navidrome") { Task { await model.playRequest(request) } }
+                            Button("Play from library") { Task { await model.playRequest(request) } }
                         } else {
-                            Text("Not yet verified as indexed in Navidrome.").font(.caption).foregroundStyle(.secondary)
+                            Text("Not yet verified as indexed in your music server.").font(.caption).foregroundStyle(.secondary)
                         }
                         if request.status == .failed, request.searchIssued, request.pendingMutation == nil {
                             Button("Retry failed search") { model.retryFailedSearch(request) }

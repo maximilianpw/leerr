@@ -19,6 +19,25 @@ This procedure does not authorize provisioning infrastructure, importing files
 into someone else's library, or changing shared server/transcode settings.
 Use an existing authorized test server/account; obtain permission for writes.
 
+## Run the gate with Jellyfin instead of Navidrome
+
+Navidrome is not a prerequisite. Select Jellyfin in Connect and use an authorized
+Jellyfin user with a scanned Music library and audio playback permission. Record
+the Jellyfin version, reverse-proxy base path (without credentials), fixture item
+ID, source metadata and server policy. Wherever this procedure names Navidrome,
+use the selected server and its corresponding metadata/capture evidence.
+
+For Jellyfin, correlate the app's `/Audio/{id}/stream` request with `static=true`
+and validate HTTP 206 / Content-Range behavior through the real proxy. Its
+`ApiKey` query parameter is a secret: redact it from logs and never copy the
+authenticated URL into evidence. There should be no media redirect or encoding
+parameters. Still compare delivered bytes and PCM with the independent fixture;
+static intent alone does not pass lossless acceptance. Album ProviderIds
+`MusicBrainzAlbum` and `MusicBrainzReleaseGroup` identify the release and group,
+respectively. For request acceptance, wait for Jellyfin indexing rather than
+mistaking Lidarr import for availability. Do not trigger scans or alter server
+settings without authorization.
+
 ## What counts as evidence
 
 Keep these three categories separate in the UI and the report:

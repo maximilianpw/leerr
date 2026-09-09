@@ -24,3 +24,10 @@ func stage1AuthenticatedRedirectPolicy(target: (String, Bool)) throws {
         try await URLSessionHTTPTransport().send(URLRequest(url: URL(string: "http://example.test/?t=fixture")!))
     }
 }
+
+@Test(arguments: [("GET", true), ("HEAD", true), ("POST", false), ("PUT", false), ("DELETE", false)])
+func authenticatedWriteNeverFollowsEvenSameOriginRedirect(method: (String, Bool)) {
+    #expect(URLSessionHTTPTransport.permitsRedirect(
+        from: URL(string: "https://music.test/Users/AuthenticateByName")!,
+        to: URL(string: "https://music.test/other")!, method: method.0) == method.1)
+}

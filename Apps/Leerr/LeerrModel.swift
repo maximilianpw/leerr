@@ -8,6 +8,7 @@ final class LeerrModel {
     let connection = ConnectionSession()
     let library = LibraryModel()
     let playback = PlaybackController()
+    private(set) var serverKind: MusicServerKind = .jellyfin
     var endpoint = ""
     var username = ""
     var password = ""
@@ -35,7 +36,7 @@ final class LeerrModel {
     private(set) var sessionID = UUID()
     @ObservationIgnored private let keychain = KeychainCredentialStore()
     @ObservationIgnored private var coordinator: AcquisitionCoordinator?
-    @ObservationIgnored private var indexedLibrary: NavidromeAcquisitionLibrary?
+    @ObservationIgnored private var indexedLibrary: IndexedMusicLibrary?
     @ObservationIgnored private var workflow: Task<Void, Never>?
     @ObservationIgnored private var draining: [Task<Void, Never>] = []
     @ObservationIgnored private var operationID = UUID()
@@ -44,10 +45,13 @@ final class LeerrModel {
     @ObservationIgnored private var albumPlaybackID = UUID()
 
     init() {
-        endpoint = UserDefaults.standard.string(forKey: "navidrome.endpoint") ?? ""
+        let defaults = UserDefaults.standard
+        serverKind = defaults.string(forKey: "musicServer.kind").flatMap(MusicServerKind.init(rawValue:))
+            ?? (defaults.string(forKey: "navidrome.endpoint") == nil ? .jellyfin : .navidrome)
+        endpoint = defaults.string(forKey: serverKind.endpointDefaultsKey) ?? ""
         lidarrEndpoint = UserDefaults.standard.string(forKey: "lidarr.endpoint") ?? ""
         do {
-            if let saved = try keychain.load(account: "navidrome:" + endpoint) {
+            if let saved = try keychain.load(account: serverKind.credentialAccount(endpoint: endpoint)) {
                 username = saved.username
                 password = saved.password
             }
@@ -61,6 +65,22 @@ final class LeerrModel {
         }
     }
 
+    func selectServer(_ kind: MusicServerKind) {
+        guard kind != serverKind else { return }
+        disconnect()
+        serverKind = kind
+        UserDefaults.standard.set(kind.rawValue, forKey: "musicServer.kind")
+        endpoint = UserDefaults.standard.string(forKey: kind.endpointDefaultsKey) ?? ""
+        username = ""
+        password = ""
+        do {
+            if let saved = try keychain.load(account: kind.credentialAccount(endpoint: endpoint)) {
+                username = saved.username
+                password = saved.password
+            }
+        } catch { message = "Saved credentials could not be read from Keychain. Enter them again." }
+    }
+
     func connect() async {
         guard !Task.isCancelled else { return }
         disconnect()
@@ -68,12 +88,22 @@ final class LeerrModel {
         do {
             let address = try ServerEndpoint(endpoint.trimmingCharacters(in: .whitespacesAndNewlines))
             let credentials = AccountCredentials(username: username, password: password)
-            let server = OpenSubsonicServer(endpoint: address, username: credentials.username, password: credentials.password)
+            let server: any MusicServer
+            switch serverKind {
+            case .navidrome:
+                server = OpenSubsonicServer(endpoint: address, username: credentials.username, password: credentials.password)
+            case .jellyfin:
+                let deviceID = UserDefaults.standard.string(forKey: "jellyfin.deviceID") ?? UUID().uuidString
+                UserDefaults.standard.set(deviceID, forKey: "jellyfin.deviceID")
+                server = JellyfinServer(endpoint: address, username: credentials.username,
+                    password: credentials.password, deviceID: deviceID)
+            }
             guard await connection.connect(to: server), account == sessionID else { return }
-            try keychain.save(credentials, account: "navidrome:" + address.baseURL.absoluteString)
+            try keychain.save(credentials, account: serverKind.credentialAccount(endpoint: address.baseURL.absoluteString))
             endpoint = address.baseURL.absoluteString
-            UserDefaults.standard.set(endpoint, forKey: "navidrome.endpoint")
-            indexedLibrary = NavidromeAcquisitionLibrary(server: server)
+            UserDefaults.standard.set(endpoint, forKey: serverKind.endpointDefaultsKey)
+            UserDefaults.standard.set(serverKind.rawValue, forKey: "musicServer.kind")
+            indexedLibrary = IndexedMusicLibrary(server: server)
             library.setServer(server)
             await library.reload()
         } catch {
@@ -113,7 +143,7 @@ final class LeerrModel {
     func forgetCredentials() {
         disconnect()
         do {
-            try keychain.delete(account: "navidrome:" + endpoint)
+            try keychain.delete(account: serverKind.credentialAccount(endpoint: endpoint))
             try keychain.delete(account: "lidarr:" + lidarrEndpoint)
             try keychain.delete(account: "lastfm")
             username = ""; password = ""; lidarrKey = ""; lastFMUsername = ""; lastFMKey = ""
@@ -251,7 +281,7 @@ final class LeerrModel {
             guard self.operationID == id else { return }
             self.inventory = fresh
             if LibraryInventory.album(in: fresh, releaseGroupMBID: group.id) != nil {
-                self.message = "This release group is already in Navidrome. Use the library playback action."
+                self.message = "This release group is already in your music library. Use the library playback action."
                 return
             }
             let identity = try ConfirmedAlbumIdentity(artistMBID: artist.id, releaseGroupMBID: group.id,
@@ -341,7 +371,8 @@ final class LeerrModel {
     private func requestStore(lidarr: ServerEndpoint) throws -> AcquisitionRequestStore {
         let directory = try FileManager.default.url(for: .applicationSupportDirectory,
             in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("Leerr/Requests", isDirectory: true)
-        let scope = [endpoint, username, lidarr.baseURL.absoluteString].joined(separator: "\n")
+        let scope = serverKind.requestAccount(endpoint: endpoint, username: username,
+            lidarrEndpoint: lidarr.baseURL.absoluteString)
         return try AcquisitionRequestStore(directory: directory, accountID: scope)
     }
 }

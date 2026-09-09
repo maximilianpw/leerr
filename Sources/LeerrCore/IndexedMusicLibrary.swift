@@ -1,8 +1,9 @@
 import Foundation
 
-/// Account-owned identity bridge. Navidrome normally exposes edition IDs, not
-/// release-group IDs. Cache only public identity mappings, never stream URLs.
-public actor NavidromeAcquisitionLibrary: AcquisitionLibrary {
+/// Account-owned identity bridge for any music server. Prefer explicit groups;
+/// resolve edition-only tags through MusicBrainz when necessary. Cache only
+/// public identity mappings, never stream URLs.
+public actor IndexedMusicLibrary: AcquisitionLibrary {
     private let inventory: LibraryInventory
     private let resolveRelease: @Sendable (String) async throws -> String?
     private var groups: [String: String] = [:]

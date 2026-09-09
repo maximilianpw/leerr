@@ -16,9 +16,10 @@ open Leerr.xcodeproj
 ```
 
 Select `Leerr-iOS` and an installed iPhone simulator, or `Leerr-macOS` and My Mac,
-then Run. Start in **Connect**, enter a valid HTTPS Navidrome address and account,
+then Run. Start in **Connect**, select **Jellyfin** or **Navidrome**, and enter the
+selected server's valid HTTPS address and user account,
 then browse/search **Library**, open an album and select a track. Credentials are
-stored in Keychain only after a successful ping. Disconnect before changing
+stored in Keychain only after successful authentication. Disconnect before changing
 accounts; **Forget saved credentials** removes this configuration's Keychain items.
 The app does not silently reconnect on launch.
 
