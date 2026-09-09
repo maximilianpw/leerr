@@ -129,12 +129,14 @@ On a real iPhone and Mac, a user can discover or search for an album that is not
 
 Leerr now includes shared Swift 6 service clients and workflows, fixture tests,
 and an integrated SwiftUI connection, library, player, discovery and request UI.
-Native builds/rendering and real-device lossless acceptance are still blocked on
-Apple hardware and live service validation; this is not a verified release.
+Both native targets build, and disconnected/provider-selection UI checks pass
+on Mac and iPhone Simulator. Live-service and real-device lossless acceptance
+remain open; this is not a verified release.
 
 - [Architecture and implementation gates](docs/architecture.md)
 - [Development setup and device-validation checklist](docs/development.md)
 - [Implementation evidence, Linear stages and remaining gates](docs/implementation-status.md)
+- [Jellyfin native verification and remaining live checks](docs/jellyfin-native-verification.md)
 - [Real-device lossless acceptance procedure — NOT RUN](docs/lossless-acceptance.md)
 
 On a Mac with Xcode 16.2+ and XcodeGen installed:

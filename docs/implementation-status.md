@@ -14,8 +14,12 @@ Jellyfin is now implemented as an alternative music server under
 Provider selection, native authentication, paginated music browsing, source
 metadata and static original-stream URLs share the existing playback/workflow
 interfaces. `IndexedMusicLibrary` preserves Jellyfin release/group IDs and
-resolves edition-only tags as needed. The earlier native report predates this
-addition; it is not evidence of Jellyfin login or playback against a live server.
+resolves edition-only tags as needed. The subsequent
+[Jellyfin native verification](jellyfin-native-verification.md) passed both Apple
+builds, 102 core tests and native provider-switching, persistence, cancellation
+and error-state checks on Mac and iPhone Simulator, including dark/XXXL rendering.
+Live Jellyfin authentication, connected library and audio delivery remain open;
+PRS-331 stays In Progress. These checks do not require a Navidrome installation.
 
 ## Linear tracks implementation separately from acceptance
 
