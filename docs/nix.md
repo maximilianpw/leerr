@@ -18,12 +18,13 @@ web assets, pruned production dependencies, and the full Inter OFL license. It
 does not install the preview server or fixture/test modules. `leerr` starts
 `server/main.ts` with real upstreams; there is no fixture fallback.
 
-## Build locally before publishing
+## Build from verified source
 
-The backend source is currently uncommitted and is not assumed to exist on any
-remote default branch. Publish the verified backend source, including this flake
-and lock, at the actual verified Leerr Git URL before using it as a remote input.
-Do not substitute an invented GitHub URL or a stale Swift-only branch.
+The verified Leerr Git remote is `https://ampcode.com/@maxpw/leerr`. Remote
+consumers must pin a published revision containing the backend, flake, and lock,
+not an older Swift-only revision. Private repository access requires Git
+authentication available to the Nix fetcher; do not embed credentials in input
+URLs or Nix files.
 
 From a complete, sanitized backend checkout:
 
@@ -54,13 +55,13 @@ sysctls automatically.
 
 ## Consume the overlay
 
-For local evaluation, this consumer flake uses an absolute path placeholder:
+This consumer flake uses the verified Amp Git remote:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
-    leerr.url = "path:/absolute/path/to/the/verified/leerr-backend";
+    leerr.url = "git+https://ampcode.com/@maxpw/leerr?ref=main";
     leerr.inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -77,8 +78,9 @@ For local evaluation, this consumer flake uses an absolute path placeholder:
 }
 ```
 
-For a published source, replace only `leerr.url` with its verified Git flake URL
-and desired ref; commit the consumer's resulting `flake.lock`. The overlay uses
+For local evaluation, replace `leerr.url` with
+`path:/absolute/path/to/the/sanitized/leerr-backend`. For remote consumption,
+commit the consumer's resulting `flake.lock` to pin a revision. The overlay uses
 the consumer's `final.callPackage`, so its nixpkgs supplies Node 24 and other
 dependencies. `follows` avoids a second nixpkgs input, but does not guarantee a
 different consumer pin builds successfully: verify the actual combination.
