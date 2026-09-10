@@ -41,7 +41,8 @@ public struct Track: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Server DTOs and authentication stay in the OpenSubsonic or Jellyfin adapter.
+/// Playback-facing library boundary. New native composition uses `LeerrAPI`;
+/// direct upstream adapters remain for legacy compatibility and tests.
 /// Cancellation propagates to network requests. An empty page ends enumeration.
 public protocol MusicServer: Sendable {
     func connect() async throws

@@ -1,0 +1,160 @@
+openapi: 3.1.0
+info:
+  title: Leerr API
+  version: 1.0.0
+  description: |
+    Implemented `/api/v1` contract. Browser clients use the `leerr` cookie and
+    `X-CSRF-Token` on mutations; native clients use a bearer token. Stream ticket
+    paths are credentials and expire 15 minutes after issue.
+servers:
+  - url: https://leerr.example
+security: [{sessionCookie: []}, {nativeBearer: []}]
+paths:
+  /health:
+    get: {security: [], responses: {'200': {description: Healthy, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}}}
+  /api/v1/setup:
+    get: {security: [], responses: {'200': {description: Setup state and explicit fixture-preview marker, content: {application/json: {schema: {type: object, required: [required, fixturePreview], properties: {required: {type: boolean}, fixturePreview: {type: boolean}}}}}}}}
+    post:
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SetupInput'}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}}
+  /api/v1/sessions:
+    post:
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginInput'}}}}
+      responses: {'200': {description: Session created, content: {application/json: {schema: {$ref: '#/components/schemas/LoginResult'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}}
+    get:
+      responses: {'200': {description: Active sessions owned by the caller, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Session'}}}}}}}, '401': {$ref: '#/components/responses/Error'}}
+  /api/v1/sessions/{id}:
+    delete:
+      parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '401': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}
+  /api/v1/me:
+    get:
+      responses: {'200': {description: Current user and browser CSRF token, content: {application/json: {schema: {type: object, required: [user, csrf], properties: {user: {$ref: '#/components/schemas/User'}, csrf: {type: [string, 'null']}}}}}}, '401': {$ref: '#/components/responses/Error'}}
+  /api/v1/admin/users:
+    get:
+      responses: {'200': {description: Users, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/AdminUser'}}}}}}}, '403': {$ref: '#/components/responses/Error'}}
+    post:
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateUser'}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/v1/admin/users/{id}:
+    patch:
+      parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, minProperties: 1, properties: {disabled: {type: boolean}, password: {$ref: '#/components/schemas/Password'}}}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/v1/admin/settings:
+    get:
+      responses: {'200': {description: Sanitized installation settings, content: {application/json: {schema: {$ref: '#/components/schemas/SettingsResult'}}}}, '403': {$ref: '#/components/responses/Error'}}
+    put:
+      description: Update supplied fields only. Jellyfin-only saves do not validate or alter Lidarr. A new Lidarr endpoint requires an API key; blank retains an existing key only for the unchanged endpoint.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SettingsInput'}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/admin/lidarr/options:
+    get:
+      responses: {'200': {description: Lidarr roots and profiles, content: {application/json: {schema: {$ref: '#/components/schemas/LidarrOptions'}}}}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/v1/connections:
+    get:
+      responses: {'200': {description: Safe connection booleans; jellyfinConfigured describes server URL presence independently of per-user credentials, content: {application/json: {schema: {type: object, required: [jellyfinConfigured, jellyfin, lastfm], properties: {jellyfinConfigured: {type: boolean}, jellyfin: {type: boolean}, lastfm: {type: boolean}}}}}}, '401': {$ref: '#/components/responses/Error'}}
+  /api/v1/connections/jellyfin:
+    put:
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [username, password], properties: {username: {type: string, minLength: 1, maxLength: 200}, password: {type: string, minLength: 1, maxLength: 512}}}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '401': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/connections/lastfm:
+    put:
+      description: Configure read-only public Last.fm username/API-key access; no OAuth or scrobbling.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [username, apiKey], properties: {username: {type: string}, apiKey: {type: string}}}}}}
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/connections/{id}:
+    delete:
+      parameters: [{name: id, in: path, required: true, schema: {type: string, enum: [jellyfin, lastfm]}}, {$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '401': {$ref: '#/components/responses/Error'}}
+  /api/v1/library:
+    get:
+      parameters: [{$ref: '#/components/parameters/Offset'}, {$ref: '#/components/parameters/Limit'}, {name: q, in: query, schema: {type: string, maxLength: 200, default: ''}}]
+      responses: {'200': {description: Caller-visible Jellyfin page, content: {application/json: {schema: {$ref: '#/components/schemas/AlbumPage'}}}}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/albums/{id}:
+    get:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Album and all tracks (server safety limit 5000), content: {application/json: {schema: {$ref: '#/components/schemas/AlbumDetail'}}}}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
+  /api/v1/artwork/{id}:
+    get:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Artwork (maximum 5 MB), content: {image/jpeg: {}, image/png: {}, image/gif: {}, image/webp: {}, image/avif: {}}}, '401': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
+  /api/v1/stream-tickets:
+    post:
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [trackID], properties: {trackID: {$ref: '#/components/schemas/ItemID'}}}}}}
+      responses: {'200': {description: 15-minute secret ticket, content: {application/json: {schema: {type: object, required: [path, expiresAt], properties: {path: {type: string, pattern: '^/api/v1/streams/'}, expiresAt: {type: integer, description: Unix epoch milliseconds}}}}}}, '401': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/v1/streams/{id}:
+    get:
+      security: []
+      description: Ticket-authenticated original stream. Ticket is in the path; redact it from logs.
+      parameters: [{$ref: '#/components/parameters/ID'}, {name: Range, in: header, schema: {type: string}}]
+      responses: {'200': {description: Full original stream}, '206': {description: Partial content}, '401': {$ref: '#/components/responses/Error'}, '416': {description: Unsatisfiable range}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/resolve:
+    get:
+      parameters: [{name: q, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 200}}]
+      responses: {'200': {description: Up to 25 release groups, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '502': {$ref: '#/components/responses/Error'}}
+  /api/v1/resolve/{id}/editions:
+    get:
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: Up to 100 editions, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Edition'}}}}}}}, '502': {$ref: '#/components/responses/Error'}}
+  /api/v1/recommendations:
+    get:
+      description: Bounded, unpaged recommendations filtered against caller requests/library.
+      responses: {'200': {description: Recommendations, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/requests:
+    post:
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RequestInput'}}}}
+      responses: {'200': {description: Existing or created per-user request ID, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
+    get:
+      description: Newest 500 caller-owned requests; not currently paginated.
+      responses: {'200': {description: Requests with per-user availability, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/Request'}}}}}}}, '503': {$ref: '#/components/responses/Error'}}
+  /api/v1/requests/{id}/retry:
+    post:
+      parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/Empty'}, '404': {$ref: '#/components/responses/Error'}}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: leerr}
+    nativeBearer: {type: http, scheme: bearer}
+  parameters:
+    ID: {name: id, in: path, required: true, schema: {$ref: '#/components/schemas/ItemID'}}
+    CSRF: {name: X-CSRF-Token, in: header, required: false, description: Required for cookie-authenticated mutations; ignored for native bearer auth., schema: {type: string}}
+    Offset: {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 24}}
+  responses:
+    Empty: {description: Success, content: {application/json: {schema: {type: object, maxProperties: 0}}}}
+    Error: {description: Generic error envelope, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    ItemID: {type: string, minLength: 1, maxLength: 200, pattern: '^[a-zA-Z0-9_-]+$'}
+    Password: {type: string, minLength: 10, maxLength: 256, writeOnly: true}
+    Credentials: {type: object, required: [username, password], properties: {username: {type: string, minLength: 1, maxLength: 64, pattern: '^[a-zA-Z0-9_.-]+$'}, password: {$ref: '#/components/schemas/Password'}}}
+    SetupInput: {allOf: [{$ref: '#/components/schemas/Credentials'}, {type: object, required: [token], properties: {token: {type: string, minLength: 1, maxLength: 256, writeOnly: true}}}]}
+    LoginInput: {allOf: [{$ref: '#/components/schemas/Credentials'}, {type: object, required: [device, name], properties: {device: {type: string, enum: [native, web]}, name: {type: string, minLength: 1, maxLength: 80}}}]}
+    User: {type: object, required: [id, username, role], properties: {id: {type: string}, username: {type: string}, role: {type: string, enum: [admin, member]}}}
+    AdminUser: {allOf: [{$ref: '#/components/schemas/User'}, {type: object, required: [disabled], properties: {disabled: {type: boolean}}}]}
+    CreateUser: {allOf: [{$ref: '#/components/schemas/Credentials'}, {type: object, required: [role], properties: {role: {type: string, enum: [admin, member]}}}]}
+    LoginResult: {type: object, required: [user, csrf], properties: {user: {$ref: '#/components/schemas/User'}, token: {type: string, description: Present only for native sessions}, csrf: {type: [string, 'null'], description: String only for web sessions}}}
+    Session: {type: object, required: [id, name, expiresAt, current], properties: {id: {type: string, description: SHA-256 digest identifier, not bearer token}, name: {type: string}, expiresAt: {type: string, format: date-time}, current: {type: boolean}}}
+    SettingsInput: {type: object, minProperties: 1, properties: {jellyfinURL: {type: string, description: Empty or HTTPS endpoint}, lidarrURL: {type: string, description: Empty or HTTPS endpoint}, lidarrKey: {type: string, maxLength: 512, writeOnly: true, description: Required for a new Lidarr endpoint; empty retains an existing key only when endpoint is unchanged}, rootFolderPath: {type: string, maxLength: 1000}, qualityProfileID: {type: integer, minimum: 0}, metadataProfileID: {type: integer, minimum: 0}}}
+    SettingsResult: {type: object, required: [jellyfinURL, lidarrURL, lidarrConfigured, rootFolderPath, qualityProfileID, metadataProfileID], properties: {jellyfinURL: {type: [string, 'null']}, lidarrURL: {type: [string, 'null']}, lidarrConfigured: {type: boolean}, rootFolderPath: {type: string}, qualityProfileID: {type: integer}, metadataProfileID: {type: integer}}}
+    Option: {type: object, required: [id, name], properties: {id: {type: integer}, name: {type: string}}}
+    LidarrOptions: {type: object, required: [roots, qualities, metadata], properties: {roots: {type: array, items: {$ref: '#/components/schemas/Option'}}, qualities: {type: array, items: {$ref: '#/components/schemas/Option'}}, metadata: {type: array, items: {$ref: '#/components/schemas/Option'}}}}
+    Album: {type: object, required: [id, title, artist, releaseGroupMBID, releaseMBID], properties: {id: {type: string}, title: {type: string}, artist: {type: string}, releaseGroupMBID: {type: [string, 'null']}, releaseMBID: {type: [string, 'null']}}}
+    AlbumPage: {type: object, required: [items, total], properties: {items: {type: array, items: {$ref: '#/components/schemas/Album'}}, total: {type: integer, minimum: 0}}}
+    Track: {type: object, required: [id, title, artist, duration, sourceCodec, sourceSampleRate, sourceBitDepth], properties: {id: {type: string}, title: {type: string}, artist: {type: string}, duration: {type: [number, 'null'], description: Seconds}, sourceCodec: {type: [string, 'null']}, sourceSampleRate: {type: [number, 'null']}, sourceBitDepth: {type: [integer, 'null']}}}
+    AlbumDetail: {type: object, required: [album, tracks], properties: {album: {$ref: '#/components/schemas/Album'}, tracks: {type: array, maxItems: 5000, items: {$ref: '#/components/schemas/Track'}}}}
+    ResolveItem: {type: object, required: [id, title, artist, artistMBID], properties: {id: {type: string, format: uuid}, title: {type: string}, artist: {type: string}, artistMBID: {type: string, format: uuid}}}
+    ResolvePage: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ResolveItem'}}}}
+    Edition: {type: object, required: [id, title, date, country], properties: {id: {type: string, format: uuid}, title: {type: string}, date: {type: [string, 'null']}, country: {type: [string, 'null']}}}
+    RequestInput: {type: object, required: [releaseGroupMBID, releaseMBID, artistMBID, confirmed], properties: {releaseGroupMBID: {type: string, format: uuid}, releaseMBID: {type: string, format: uuid}, artistMBID: {type: string, format: uuid}, confirmed: {type: boolean, const: true}}}
+    Request: {type: object, required: [id, releaseGroupMBID, releaseMBID, title, artist, status, albumID], properties: {id: {type: string}, releaseGroupMBID: {type: string}, releaseMBID: {type: string}, title: {type: string}, artist: {type: string}, status: {type: string, description: requested, acquiring, imported, available, failed, or uncertain}, albumID: {type: [string, 'null'], description: Present only when available to this Jellyfin user}}}
+    Error: {type: object, required: [error], properties: {error: {type: object, required: [code, message], properties: {code: {type: string}, message: {type: string}}}}}
+    Health: {type: object, required: [status], properties: {status: {type: string, const: ok}}}

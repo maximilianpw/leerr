@@ -1,0 +1,7 @@
+.git
+.build
+node_modules
+data
+.env*
+.amp
+DerivedData

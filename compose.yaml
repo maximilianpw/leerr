@@ -1,0 +1,24 @@
+services:
+  leerr:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      LEERR_ORIGIN: ${LEERR_ORIGIN:?Set the public HTTPS origin}
+      LEERR_TRUST_PROXY: ${LEERR_TRUST_PROXY:?Set the reverse proxy IP/CIDR}
+      LEERR_KEY_FILE: /run/secrets/leerr_key
+    volumes:
+      - leerr_data:/data
+    secrets:
+      - leerr_key
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+secrets:
+  leerr_key:
+    file: ${LEERR_KEY_FILE:?Set the separately protected encryption key file}
+volumes:
+  leerr_data:

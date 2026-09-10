@@ -1,149 +1,81 @@
 # Leerr
 
-Leerr is a native music app for iPhone and macOS that brings discovery, acquisition, and high-quality playback into one experience for people who host their own music.
+Leerr is a self-hosted music discovery, request, and playback application. A
+single TypeScript/Fastify process serves the React web UI, `/api/v1`, and a
+bounded reconciliation worker backed by SQLite. Native iPhone and macOS clients
+compose against that Leerr API; browser playback is intentionally deferred.
 
-The goal is a simple end-to-end flow:
+This checkout is not a scaffold. It includes the server and web application and
+a substantial earlier native implementation: direct Jellyfin and Navidrome
+adapters, Keychain credential storage, original-file playback, Lidarr
+acquisition, Last.fm/MusicBrainz discovery, and tests. The current native
+composition uses `LeerrAPI`; it deliberately does **not** discover, migrate,
+read, upload, or delete credentials saved by those legacy adapters. Re-enter
+connections in Leerr and retain old credentials until rollback is no longer
+needed.
 
-> Discover an album, request it, follow it into the library, and play the original file without switching apps.
+## What is implemented
 
-Leerr is a client and orchestrator, not another media store. Music remains on the user's server in ordinary directories and is served by an existing music server.
+- local administrator/member accounts, Argon2id password hashes, 30-day web and
+  native device sessions, CSRF checks, revocation, and login/setup rate limits
+- administrator-owned Jellyfin endpoint and Lidarr settings; per-user encrypted
+  Jellyfin tokens and read-only Last.fm public username/API-key connections
+- paginated Jellyfin library/search (default 24, maximum 500), album tracks and
+  artwork, preserving each Jellyfin user's permissions
+- account-scoped 15-minute opaque tickets that proxy Jellyfin original streams,
+  including Range responses and cancellation
+- MusicBrainz resolution/edition confirmation, durable per-user requests, and a
+  serial Lidarr reconciliation worker with mutation journaling
+- React setup, login, settings, library, discovery, and request interfaces
 
-## Product direction
+“Imported” is Lidarr state; “available” is computed per user only after that
+user can see the album in Jellyfin. Request listings are capped at the newest
+500 records and are not currently cursor-paginated. Last.fm access uses public,
+read-only API calls—there is no OAuth, scrobbling, or private Last.fm session.
 
-Leerr combines four responsibilities that are normally spread across separate applications:
+The worker never blindly repeats a journaled uncertain Lidarr mutation. If
+Lidarr history has disappeared, state remains uncertain and requires operator
+inspection rather than an automatic repeat. Multi-instance/horizontally scaled
+operation is not supported.
 
-- **Last.fm** supplies listening history and discovery signals.
-- **Leerr** presents recommendations, resolves identities, and coordinates the workflow.
-- **Lidarr** acquires and organizes requested music.
-- **Jellyfin or Navidrome** indexes the music library and serves the original files.
+## Quick development checks
 
-Use your existing Jellyfin server; Navidrome is not required. The two adapters share the same library, playback, discovery and request workflow. Jellyfin uses its native API; Navidrome uses OpenSubsonic.
-
-```text
-┌─────────┐  discovery  ┌───────┐  requests  ┌────────┐
-│ Last.fm │────────────▶│ Leerr │───────────▶│ Lidarr │
-└─────────┘             └───▲───┘            └───┬────┘
-                            │ streams             │ writes
-                            │                     ▼
-                      ┌─────┴─────┐ scan  ┌─────────────────┐
-                      │ Jellyfin  │◀──────│ Music directory │
-                      └───────────┘       └─────────────────┘
-```
-
-Lidarr writes to the music directory. Your selected music server scans that same directory, ideally through a read-only mount. Files do not need to be duplicated or owned by any one media server.
-
-## Connect to Jellyfin
-
-1. In **Connect**, choose **Jellyfin** under **Server type** (the default for new setups).
-2. Enter the HTTPS server address, including any reverse-proxy base path, and your Jellyfin username/password. Use a user with access to a **Music** library and permission to play its audio.
-3. Connect, then browse or search albums in **Library**. Lidarr and Last.fm are optional for playing your existing music.
-
-Existing saved Navidrome setups retain their selection. Disconnect before changing server type; credentials and request journals are kept separate. Jellyfin login tokens stay in memory and login credentials stay in Keychain. The client requests static original audio, not a transcode; the server/proxy must support HTTPS byte-range responses without media redirects. Actual codec/container playback still requires validation on your Apple device. HTTP-only endpoints and certificate bypass are not supported.
-
-Jellyfin's `MusicBrainzAlbum` tag is an edition/release ID, while `MusicBrainzReleaseGroup` is a group ID. Missing identity tags cannot prove an album is absent. Lidarr imports become playable only after the selected server indexes the intended edition; Leerr does not trigger a server scan or alter library settings.
-
-## Discovery and requests
-
-Last.fm does not transfer music to Lidarr. Leerr bridges the two systems:
-
-1. Read the user's recent tracks, loved tracks, top artists, and top albums from Last.fm.
-2. Use similar artists, similar tracks, tags, and artist catalogs to build recommendations.
-3. Remove releases already present in the music library or already requested.
-4. Let the user select an album in Leerr.
-5. Resolve the artist and release through MusicBrainz and Lidarr.
-6. Show the exact match for confirmation when identity is ambiguous.
-7. Ask Lidarr to monitor and search for the album.
-8. Track acquisition and import until the selected music server indexes the files.
-
-Last.fm identifiers are not consistently populated, so matching by name alone must never silently request an uncertain release. MusicBrainz IDs should be the canonical bridge where available, with explicit user confirmation as the fallback.
-
-A later share extension may accept a Last.fm artist or album URL and open the same resolution and request flow in Leerr.
-
-## Playback quality
-
-On trusted, sufficiently fast connections, Leerr should request the original stream from Jellyfin or Navidrome rather than a lossy transcode. The first version targets direct playback of formats supported by Apple platforms, including FLAC, WAV, and ALAC.
-
-The player should:
-
-- Prefer the original file on local networks and Wi-Fi.
-- Allow an optional bandwidth-limited stream on mobile data.
-- Display the actual codec, sample rate, bit depth, and whether transcoding occurred.
-- Support a playback queue, seeking, play/pause, and track skipping.
-- Integrate with background audio, lock-screen controls, media keys, and the system Now Playing UI.
-- Recover clearly from interrupted streams and server unavailability.
-
-Lossless direct streaming is an initial requirement. Bit-perfect output, exclusive device access, and automatic hardware sample-rate switching are separate audiophile features and are not promised by the first version.
-
-## Apple clients
-
-Leerr will use Swift and SwiftUI with native iOS and macOS targets. Shared code should own domain models, service clients, identity resolution, library state, and playback coordination. Platform-specific code should be limited to concerns such as audio sessions, media commands, menus, and output-device behavior.
-
-Initial technologies:
-
-- Swift and SwiftUI
-- Swift concurrency and `URLSession`
-- AVFoundation for playback
-- MediaPlayer for system playback controls
-- Keychain for credentials
-- Jellyfin and OpenSubsonic music-server APIs
-- Last.fm, MusicBrainz, and Lidarr HTTP APIs
-
-React Native is not planned. The product is currently Apple-platform focused, and its most important behavior relies on native audio and operating-system integrations.
-
-## First milestone: lossless vertical slice
-
-The first milestone proves the riskiest path before building a broad interface:
-
-1. Connect securely to a Jellyfin or Navidrome server.
-2. Browse and search its library on iPhone and macOS.
-3. Select a FLAC album and stream the original file.
-4. Show verified stream format information.
-5. Control playback using the platform's system media controls.
-6. Exercise the flow on real Apple hardware over a real network.
-
-After that works, add Lidarr request tracking and then Last.fm-powered discovery.
-
-## First-version acceptance
-
-On a real iPhone and Mac, a user can discover or search for an album that is not in the library, resolve and request it through Lidarr, follow its status until it appears in the selected music server, and play the original lossless stream. Albums already in the library offer playback instead of duplicate requests. Network failures, ambiguous matches, failed requests, and interrupted streams present recoverable states.
-
-## Security and deployment
-
-- Service credentials belong in Keychain and must never be committed or logged.
-- Servers should be reached over HTTPS or a private network such as a VPN; Leerr should not encourage exposing unauthenticated services to the internet.
-- Stream URLs may contain credentials and must be treated as secrets.
-- The music server should have read-only access to the music files when practical.
-- A companion backend is not required initially. It may become useful for push notifications, credential isolation, or controlled remote access.
-
-## Follow-up scope
-
-- Offline downloads
-- Playlists and richer queue management
-- AirPlay polish
-- Last.fm scrobbling without duplicate submissions
-- Push notifications when requested music becomes available
-- Additional OpenSubsonic-compatible servers
-- Advanced macOS audio-device controls and bit-perfect playback research
-
-## Development status
-
-Leerr now includes shared Swift 6 service clients and workflows, fixture tests,
-and an integrated SwiftUI connection, library, player, discovery and request UI.
-Both native targets build, and disconnected/provider-selection UI checks pass
-on Mac and iPhone Simulator. Live-service and real-device lossless acceptance
-remain open; this is not a verified release.
-
-- [Architecture and implementation gates](docs/architecture.md)
-- [Development setup and device-validation checklist](docs/development.md)
-- [Implementation evidence, Linear stages and remaining gates](docs/implementation-status.md)
-- [Jellyfin native verification and remaining live checks](docs/jellyfin-native-verification.md)
-- [Real-device lossless acceptance procedure — NOT RUN](docs/lossless-acceptance.md)
-
-On a Mac with Xcode 16.2+ and XcodeGen installed:
+Node 22.13+ and Swift 6.0.3 are the reference environments.
 
 ```sh
-./scripts/check
-open Leerr.xcodeproj
+npm ci
+npm run lint
+node scripts/check-anti-slop.mjs
+npm test
+npm run build
+swift test
 ```
 
-The check script runs package tests and generates/builds both app targets. On Linux with Swift installed it runs core tests only. The generated Xcode project is not committed; edit `project.yml` instead. Native builds and visual checks require macOS; background playback, stream quality and media controls require real-device validation.
+Native build/UI verification requires Xcode 16.2+, XcodeGen 2.42+, and a Mac;
+see [development.md](docs/development.md). Local verification passed 27 server
+tests, lint with an active anti-slop rejection probe, TypeScript/Vite builds,
+and Docker build/non-root startup/account persistence across restart. Rendered
+web setup, settings, library, editions, requests, empty/error, and narrow layouts
+were inspected. The Mac runner passed 107 Swift tests, both unsigned app builds,
+and inspected reachable signed-out UI. Final XCTest runs each had 1 pass and
+1 failure (Mac relaunch/window discovery; iPhone Simulator tab targeting).
+Authenticated UI/audio acceptance remains open: no live Jellyfin/Lidarr credentials
+or playback hardware were supplied. See the development verification boundary
+before release.
+
+## Deployment
+
+See [server-development.md](docs/server-development.md) for the complete Docker,
+HTTPS proxy, key, setup, backup/restore, and recovery runbook. In brief: deploy
+one container/process, persist `/data`, mount a separately protected read-only
+file containing a base64-encoded 32-byte encryption key, and put Leerr behind an
+HTTPS reverse proxy. Preserve `Host` and set `LEERR_TRUST_PROXY` only to the
+proxy's exact IP addresses/CIDRs.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Development and verification](docs/development.md)
+- [Shared-server plan and release gates](docs/shared-server-plan.md)
+- [Server deployment and operator runbook](docs/server-development.md)
+- [OpenAPI 3.1 contract](docs/openapi.yaml)
