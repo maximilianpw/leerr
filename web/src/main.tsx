@@ -17,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   UserRound,
+  UsersRound,
 } from "lucide-react";
 import "./styles.css";
 
@@ -60,8 +61,25 @@ const resolveItemSchema = z.object({
   title: z.string(),
   artist: z.string(),
   artistMBID: z.string(),
+  coverUrl: z.string().optional(),
 });
-const resolveSchema = z.object({ items: z.array(resolveItemSchema) });
+const artistResultSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  disambiguation: z.string(),
+  country: z.string(),
+  type: z.string(),
+});
+type ArtistResult = z.infer<typeof artistResultSchema>;
+const resolveSchema = z.object({
+  items: z.array(resolveItemSchema),
+  total: z.number().optional(),
+  artists: z.array(artistResultSchema).default([]),
+});
+const recommendationsSchema = resolveSchema.extend({
+  source: z.enum(["lastfm", "musicbrainz"]),
+  emptyReason: z.enum(["no_candidates", "all_excluded"]).nullable(),
+});
 const editionSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -618,30 +636,70 @@ function Discover({
   open: (id: string) => void;
 }) {
   const [items, setItems] = useState<ResolveItem[]>([]),
+    [artists, setArtists] = useState<ArtistResult[]>([]),
+    [artist, setArtist] = useState<ArtistResult | null>(null),
+    [offset, setOffset] = useState(0),
+    [total, setTotal] = useState(0),
     [query, setQuery] = useState(""),
+    [searchQuery, setSearchQuery] = useState(""),
+    [filter, setFilter] = useState<"all" | "artists" | "albums">("all"),
     [loading, setLoading] = useState(true),
     [error, setError] = useState(""),
+    [emptyText, setEmptyText] = useState(""),
     [selected, setSelected] = useState<ResolveItem | null>(null);
-  const load = useCallback(async (q: string) => {
-    setLoading(true);
-    setError("");
-    try {
-      setItems(
-        (
-          await request(
-            q ? `/resolve?q=${encodeURIComponent(q)}` : "/recommendations",
+  const generation = useRef(0);
+  const load = useCallback(
+    async (q: string, chosen: ArtistResult | null = null, start = 0) => {
+      const current = ++generation.current;
+      setLoading(true);
+      setError("");
+      setSearchQuery(q);
+      setArtist(chosen);
+      setOffset(start);
+      setArtists([]);
+      try {
+        if (q || chosen) {
+          const page = await request(
+            chosen
+              ? `/artists/${encodeURIComponent(chosen.id)}/albums?offset=${start}`
+              : `/resolve?q=${encodeURIComponent(q)}`,
             resolveSchema,
-          )
-        ).items,
-      );
-    } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : "Discovery is unavailable.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+          );
+          if (current !== generation.current) return;
+          setItems(page.items);
+          setArtists(page.artists);
+          setTotal(page.total ?? page.items.length);
+          setEmptyText(
+            chosen
+              ? "MusicBrainz has no albums for this artist."
+              : "No artists or albums matched all your search terms. Try fewer words or an artist name.",
+          );
+        } else {
+          const page = await request("/recommendations", recommendationsSchema);
+          if (current !== generation.current) return;
+          setItems(page.items);
+          setTotal(0);
+          setEmptyText(
+            page.emptyReason === "all_excluded"
+              ? "All suggested albums are already in your library or requests. Search for another album."
+              : page.source === "lastfm"
+                ? "No album recommendations were found from your Last.fm listening history over the last three months and MusicBrainz matches. Search for an album or review your Last.fm history."
+                : "MusicBrainz returned no album suggestions. Search for an album or connect Last.fm in Settings for personalized discovery.",
+          );
+        }
+      } catch (caught) {
+        if (current !== generation.current) return;
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Discovery is unavailable.",
+        );
+      } finally {
+        if (current === generation.current) setLoading(false);
+      }
+    },
+    [],
+  );
   useEffect(() => {
     void load("");
   }, [load]);
@@ -649,15 +707,19 @@ function Discover({
     event.preventDefault();
     void load(query.trim());
   }
+  const showArtists = !artist && filter !== "albums";
+  const showAlbums = !!artist || !searchQuery || filter !== "artists";
   return (
     <div className="page">
       <header className="top">
         <div>
-          <h1>{query ? "Search" : "Discover"}</h1>
+          <h1>{artist ? artist.name : searchQuery ? "Search" : "Discover"}</h1>
           <p>
-            {query
-              ? "Choose the exact album and edition you want."
-              : "Recommendations from your connections."}
+            {artist
+              ? "MusicBrainz albums. Choose an album, then confirm its edition."
+              : searchQuery
+                ? "MusicBrainz artists and albums matching all your terms. Choose an artist to browse albums."
+                : "Last.fm and MusicBrainz suggestions, filtered against your requests and connected Jellyfin library."}
           </p>
         </div>
         <form className="search" onSubmit={searchSubmit}>
@@ -671,38 +733,130 @@ function Discover({
           <kbd>↵</kbd>
         </form>
       </header>
-      <SectionState
-        loading={loading}
-        error={error}
-        empty={!items.length}
-        retry={() => void load(query)}
-        emptyText={
-          query
-            ? "No releases matched your search."
-            : "Recommendations will appear when discovery services are connected."
-        }
-        skeleton={<ArtSkeleton />}
-      >
-        <div className="artGrid">
-          {items.map((item) => (
+      {searchQuery && !artist && (
+        <div className="tabs" role="group" aria-label="Search result type">
+          {(["all", "artists", "albums"] as const).map((type) => (
             <button
-              className="artCard discover"
-              key={item.id}
-              title={`${item.title} — ${item.artist}`}
-              onClick={() => setSelected(item)}
+              key={type}
+              className={filter === type ? "active" : ""}
+              aria-pressed={filter === type}
+              onClick={() => setFilter(type)}
             >
-              <Artwork src={releaseGroupArtwork(item.id)} />
-              <span className="artBadge">Album</span>
-              <span className="artShade">
-                <span className="artCopy">
-                  <b>{item.title}</b>
-                  <small>{item.artist}</small>
-                </span>
-                <span className="artCta">Request</span>
-              </span>
+              {type === "all"
+                ? "All"
+                : type === "artists"
+                  ? "Artists"
+                  : "Albums"}
             </button>
           ))}
         </div>
+      )}
+      {artist && (
+        <button className="secondary" onClick={() => void load(searchQuery)}>
+          <ArrowLeft /> Back to search
+        </button>
+      )}
+      <SectionState
+        loading={loading}
+        error={error}
+        empty={
+          !(showAlbums && items.length) && !(showArtists && artists.length)
+        }
+        retry={() => void load(searchQuery, artist, offset)}
+        emptyText={
+          !artist && searchQuery && filter !== "all"
+            ? `No ${filter} matched all your search terms. Try All or fewer words.`
+            : emptyText
+        }
+        skeleton={<ArtSkeleton />}
+      >
+        {showArtists && artists.length > 0 && (
+          <section aria-label="Artist matches" className="artistMatches">
+            <h2>Artists</h2>
+            {artists.map((match) => (
+              <button
+                className="secondary artistMatch"
+                key={match.id}
+                onClick={() => void load(searchQuery, match)}
+              >
+                {match.type === "Group" ? <UsersRound /> : <UserRound />}
+                <span>
+                  <small>ARTIST</small>
+                  <b>{match.name}</b>
+                  <small>
+                    {[match.disambiguation, match.type, match.country]
+                      .filter(Boolean)
+                      .join(" · ") || "MusicBrainz artist"}
+                  </small>
+                </span>
+                <small>Browse albums</small>
+                <ChevronRight />
+              </button>
+            ))}
+            {artists.length === 10 && (
+              <p>
+                Showing the top 10 artists. Add words to narrow the matches.
+              </p>
+            )}
+          </section>
+        )}
+        {showAlbums && searchQuery && items.length > 0 && <h2>Albums</h2>}
+        {showAlbums && (
+          <div className="artGrid">
+            {items.map((item) => (
+              <button
+                className="artCard discover"
+                key={item.id}
+                title={`${item.title} — ${item.artist}`}
+                onClick={() => setSelected(item)}
+              >
+                <Artwork
+                  src={item.coverUrl ?? releaseGroupArtwork(item.id)}
+                  fallbackSrc={releaseGroupArtwork(item.id)}
+                />
+                <span className="artBadge">
+                  <Disc3 aria-hidden="true" /> Album
+                </span>
+                <span className="artShade">
+                  <span className="artCopy">
+                    <b>{item.title}</b>
+                    <small>{item.artist}</small>
+                  </span>
+                  <span className="artCta">Request</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {artist && (
+          <div className="searchPages">
+            <button
+              className="secondary"
+              disabled={offset === 0}
+              onClick={() =>
+                void load(searchQuery, artist, Math.max(0, offset - 25))
+              }
+            >
+              Previous
+            </button>
+            <span>
+              {offset + 1}–{offset + items.length} of {total}
+            </span>
+            <button
+              className="secondary"
+              disabled={offset + items.length >= total || offset >= 10000}
+              onClick={() => void load(searchQuery, artist, offset + 25)}
+            >
+              Next
+            </button>
+          </div>
+        )}
+        {showAlbums && !artist && searchQuery && total > items.length && (
+          <p>
+            Showing the top {items.length} albums. Add title words to narrow the
+            results, or choose an artist.
+          </p>
+        )}
       </SectionState>
       {selected && (
         <EditionDialog
@@ -715,9 +869,24 @@ function Discover({
     </div>
   );
 }
-function Artwork({ id, src }: { id?: string; src?: string }) {
-  const [ready, setReady] = useState(false);
-  const url = src || (id ? artwork(id) : "");
+function Artwork({
+  id,
+  src,
+  fallbackSrc,
+}: {
+  id?: string;
+  src?: string;
+  fallbackSrc?: string;
+}) {
+  const [loaded, setLoaded] = useState("");
+  const [failed, setFailed] = useState<string[]>([]);
+  const primary = src || (id ? artwork(id) : "");
+  const url = !failed.includes(primary)
+    ? primary
+    : fallbackSrc && !failed.includes(fallbackSrc)
+      ? fallbackSrc
+      : "";
+  const ready = !!url && loaded === url;
   return (
     <div className={`artwork${ready ? " ready" : ""}`}>
       {url && (
@@ -726,17 +895,12 @@ function Artwork({ id, src }: { id?: string; src?: string }) {
           src={url}
           alt=""
           loading="lazy"
-          onLoad={(event) => {
-            event.currentTarget.hidden = false;
-            setReady(true);
-          }}
-          onError={(event) => {
-            event.currentTarget.hidden = true;
-            setReady(false);
-          }}
+          onLoad={() => setLoaded(url)}
+          onError={() => setFailed((previous) => [...previous, url])}
         />
       )}
       <Disc3 aria-hidden="true" />
+      {!url && <span className="coverStatus">Cover unavailable</span>}
     </div>
   );
 }
@@ -879,7 +1043,10 @@ function EditionDialog({
       ) : (
         <>
           <div className="editionHead">
-            <Artwork src={releaseGroupArtwork(item.id)} />
+            <Artwork
+              src={item.coverUrl ?? releaseGroupArtwork(item.id)}
+              fallbackSrc={releaseGroupArtwork(item.id)}
+            />
             <div>
               <span className="eyebrow">CONFIRM RELEASE</span>
               <h2 id="edition-title">Choose an edition</h2>

@@ -26,13 +26,15 @@ class PreviewUpstreams extends FakeUpstreams {
         "After the Rain",
         "Frequencies",
         "Slow Motion",
-      ].map((title, index): Album => ({
-        id: `preview-${index}`,
-        title,
-        artist: ["Coastal Lines", "Mira Sol", "Northbound"][index % 3],
-        releaseGroupMBID: null,
-        releaseMBID: null,
-      })),
+      ].map(
+        (title, index): Album => ({
+          id: `preview-${index}`,
+          title,
+          artist: ["Coastal Lines", "Mira Sol", "Northbound"][index % 3],
+          releaseGroupMBID: null,
+          releaseMBID: null,
+        }),
+      ),
     ]);
   }
   override async resolve(q: string) {
@@ -49,6 +51,9 @@ class PreviewUpstreams extends FakeUpstreams {
   }
   override async recommendations() {
     return this.resolve("");
+  }
+  override async search(q: string) {
+    return { ...(await this.resolve(q)), artists: [] };
   }
   override async editions() {
     return {

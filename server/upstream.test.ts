@@ -187,7 +187,10 @@ test("original audio first authorizes the user and preserves range streaming", a
         ? input
         : new URL(input instanceof Request ? input.url : input);
     calls.push(url.pathname);
-    assert.equal(new Headers(init?.headers).get("x-emby-token"), "token");
+    assert.equal(
+      new Headers(init?.headers).get("Authorization"),
+      'MediaBrowser Token="token"',
+    );
     if (calls.length === 1)
       return json({ Id: "track", Name: "Song", Type: "Audio" });
     assert.equal(new Headers(init?.headers).get("range"), "bytes=10-20");

@@ -98,16 +98,22 @@ paths:
       responses: {'200': {description: Full original stream}, '206': {description: Partial content}, '401': {$ref: '#/components/responses/Error'}, '416': {description: Unsatisfiable range}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /api/v1/resolve:
     get:
+      description: Literal all-term MusicBrainz search. Returns up to 10 artist matches with disambiguation and 25 title-matched album release groups. All/Artists/Albums UI filters preserve the query and filter these two result collections without new requests. Optional Last.fm artwork uses only the caller's connection and exact title/credited-artist matches; artwork failure does not fail search.
       parameters: [{name: q, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 200}}]
-      responses: {'200': {description: Up to 25 release groups, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '502': {$ref: '#/components/responses/Error'}}
+      responses: {'200': {description: Artist and release-group matches, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '502': {$ref: '#/components/responses/Error'}}
+  /api/v1/artists/{id}/albums:
+    get:
+      description: MusicBrainz release groups of primary type album, scoped to the selected artist MBID. Does not acquire music or bypass edition confirmation.
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}, {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 10000, default: 0}}]
+      responses: {'200': {description: Up to 25 albums and total count, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '401': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
   /api/v1/resolve/{id}/editions:
     get:
       parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
       responses: {'200': {description: Up to 100 editions, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Edition'}}}}}}}, '502': {$ref: '#/components/responses/Error'}}
   /api/v1/recommendations:
     get:
-      description: Bounded, unpaged recommendations filtered against caller requests/library.
-      responses: {'200': {description: Recommendations, content: {application/json: {schema: {$ref: '#/components/schemas/ResolvePage'}}}}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+      description: Bounded, unpaged recommendations filtered against caller requests/library. Empty candidates skip library I/O. Failed or incomplete connected-library filtering returns an error without partial items.
+      responses: {'200': {description: Recommendations, content: {application/json: {schema: {$ref: '#/components/schemas/RecommendationsPage'}}}}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /api/v1/requests:
     post:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
@@ -151,8 +157,10 @@ components:
     AlbumPage: {type: object, required: [items, total], properties: {items: {type: array, items: {$ref: '#/components/schemas/Album'}}, total: {type: integer, minimum: 0}}}
     Track: {type: object, required: [id, title, artist, duration, sourceCodec, sourceSampleRate, sourceBitDepth], properties: {id: {type: string}, title: {type: string}, artist: {type: string}, duration: {type: [number, 'null'], description: Seconds}, sourceCodec: {type: [string, 'null']}, sourceSampleRate: {type: [number, 'null']}, sourceBitDepth: {type: [integer, 'null']}}}
     AlbumDetail: {type: object, required: [album, tracks], properties: {album: {$ref: '#/components/schemas/Album'}, tracks: {type: array, maxItems: 5000, items: {$ref: '#/components/schemas/Track'}}}}
-    ResolveItem: {type: object, required: [id, title, artist, artistMBID], properties: {id: {type: string, format: uuid}, title: {type: string}, artist: {type: string}, artistMBID: {type: string, format: uuid}}}
-    ResolvePage: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ResolveItem'}}}}
+    ResolveItem: {type: object, required: [id, title, artist, artistMBID], properties: {id: {type: string, format: uuid, description: 'MusicBrainz release-group ID, never a Last.fm release ID'}, title: {type: string}, artist: {type: string}, artistMBID: {type: string, format: uuid}, coverUrl: {type: string, format: uri, description: Optional allowlisted Last.fm image; use CAA release-group art when absent or failed}}}
+    ArtistResult: {type: object, required: [id, name, disambiguation, country, type], properties: {id: {type: string, format: uuid}, name: {type: string}, disambiguation: {type: string}, country: {type: string}, type: {type: string}}}
+    ResolvePage: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ResolveItem'}}, total: {type: integer, minimum: 0}, artists: {type: array, items: {$ref: '#/components/schemas/ArtistResult'}}}}
+    RecommendationsPage: {allOf: [{$ref: '#/components/schemas/ResolvePage'}, {type: object, required: [source, emptyReason], properties: {source: {type: string, enum: [lastfm, musicbrainz]}, emptyReason: {type: [string, 'null'], enum: [no_candidates, all_excluded, null], description: Null when items are present; otherwise distinguishes no upstream candidates from candidates excluded by requests or library ownership.}}}]}
     Edition: {type: object, required: [id, title, date, country], properties: {id: {type: string, format: uuid}, title: {type: string}, date: {type: [string, 'null']}, country: {type: [string, 'null']}}}
     RequestInput: {type: object, required: [releaseGroupMBID, releaseMBID, artistMBID, confirmed], properties: {releaseGroupMBID: {type: string, format: uuid}, releaseMBID: {type: string, format: uuid}, artistMBID: {type: string, format: uuid}, confirmed: {type: boolean, const: true}}}
     Request: {type: object, required: [id, releaseGroupMBID, releaseMBID, title, artist, status, albumID], properties: {id: {type: string}, releaseGroupMBID: {type: string}, releaseMBID: {type: string}, title: {type: string}, artist: {type: string}, status: {type: string, description: requested, acquiring, imported, available, failed, or uncertain}, albumID: {type: [string, 'null'], description: Present only when available to this Jellyfin user}}}

@@ -436,6 +436,12 @@ aside nav {
   padding: 3px 8px;
 }
 
+.artBadge svg {
+  width: 12px;
+  height: 12px;
+  vertical-align: -2px;
+}
+
 .artCard.discover .artBadge {
   border-color: var(--discover-border);
   background: rgb(var(--discover-rgb) / 0.85);
@@ -481,6 +487,38 @@ aside nav {
   font-weight: 700;
 }
 
+.artistMatches {
+  display: grid;
+  gap: 0.6rem;
+  margin-bottom: 1.5rem;
+}
+
+.secondary.artistMatch {
+  text-align: left;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 10px 12px;
+}
+
+.artistMatch span {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+}
+
+.artistMatch small {
+  display: block;
+  font-weight: 400;
+}
+
+.searchPages {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
 .artwork {
   aspect-ratio: 1;
   position: relative;
@@ -505,6 +543,13 @@ aside nav {
 
 .artwork.ready img {
   opacity: 1;
+}
+
+.coverStatus {
+  position: absolute;
+  top: 23%;
+  font-size: 0.7rem;
+  color: #d1d5db;
 }
 
 .artwork > svg {

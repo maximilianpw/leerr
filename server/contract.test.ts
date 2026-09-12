@@ -7,7 +7,7 @@ test("OpenAPI is valid and every implemented route has a documented operation", 
   const api = await SwaggerParser.validate("docs/openapi.yaml");
   const source = readFileSync("server/app.ts", "utf8");
   const routes = [...source.matchAll(/app\.(get|post|put|patch|delete)\(\s*["']([^"']+)["']/g)];
-  assert.equal(routes.length, 28, 'The route scanner must cover all registered operations');
+  assert.equal(routes.length, 29, 'The route scanner must cover all registered operations');
   for (const route of routes) {
     const path = route[2].replace(/:([a-zA-Z]+)/g, "{$1}");
     const operation = api.paths?.[path];

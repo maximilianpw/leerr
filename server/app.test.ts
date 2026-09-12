@@ -21,7 +21,7 @@ import {
 
 const host = { host: "leerr.test" },
   origin = { ...host, origin: "https://leerr.test" };
-async function harness() {
+async function harness(fetcher?: typeof fetch) {
   const store = makeStore(),
     upstream = new FakeUpstreams();
   let clock = 1_700_000_000_000;
@@ -30,7 +30,7 @@ async function harness() {
     origin: "https://leerr.test",
     setupToken: "fixture-setup",
     secure: false,
-    upstream,
+    upstream: fetcher ? new Upstreams(fetcher) : upstream,
     now: () => clock,
   });
   const inject = (o: InjectOptions) =>
@@ -763,8 +763,8 @@ test("artwork requires a session and per-user Jellyfin access before delivering 
     paths.push(url.pathname);
     assert.equal(url.search, "");
     assert.equal(
-      new Headers(init?.headers).get("X-Emby-Token"),
-      "private-art-token",
+      new Headers(init?.headers).get("Authorization"),
+      'MediaBrowser Token="private-art-token"',
     );
     assert.equal(init?.redirect, "manual");
     if (url.pathname === "/Users/private-user/Items/allowed") {
@@ -947,6 +947,284 @@ test("service setup is independent and a new Lidarr URL requires a key before I/
   );
   assert.equal(h.store.settings().jellyfinURL, "https://jellyfin-new.test");
   assert.equal(h.store.settings().lidarrURL, "https://lidarr.test");
+});
+
+test("Discover separates candidate generation from fail-closed Jellyfin filtering", async (t) => {
+  let mode = "empty";
+  let jellyCalls = 0;
+  const fetcher: typeof fetch = async (input) => {
+    assert.ok(input instanceof URL);
+    const json = <T>(body: T, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    if (input.hostname === "ws.audioscrobbler.com") {
+      if (mode === "lastfm401") return json({}, 401);
+      if (mode === "lastfmApi")
+        return json({ error: 10, message: "private-upstream-text" });
+      switch (input.searchParams.get("method")) {
+        case "user.getTopArtists":
+          return json({
+            topartists: { artist: mode === "empty" ? [] : [{ name: "Seed" }] },
+          });
+        case "artist.getSimilar":
+          return json({ similarartists: { artist: [{ name: "Similar" }] } });
+        case "artist.getTopAlbums":
+          return json({ topalbums: { album: [{ name: "Album" }] } });
+        default:
+          throw new Error("Unexpected Last.fm method");
+      }
+    }
+    if (input.hostname === "musicbrainz.org") {
+      if (mode === "musicbrainz401") return json({}, 401);
+      return json({
+        "release-groups": [
+          {
+            id: identities.album.releaseGroupMBID,
+            title: "Album",
+            "artist-credit": [
+              { artist: { id: identities.album.artistMBID, name: "Similar" } },
+            ],
+          },
+        ],
+        count: 1,
+      });
+    }
+    assert.equal(input.hostname, "jelly.test");
+    assert.equal(input.pathname, "/Items");
+    jellyCalls++;
+    if (mode === "owned")
+      return json({
+        Items: [
+          {
+            Id: "owned",
+            Name: "Album",
+            ProviderIds: {
+              MusicBrainzReleaseGroup: identities.album.releaseGroupMBID,
+            },
+          },
+        ],
+        TotalRecordCount: 1,
+      });
+    if (mode === "partial" && input.searchParams.get("startIndex") === "0")
+      return json({
+        Items: Array.from({ length: 500 }, (_, i) => ({
+          Id: `item-${i}`,
+          Name: "Album",
+          ProviderIds: {
+            MusicBrainzReleaseGroup: identities.album.releaseGroupMBID,
+          },
+        })),
+        TotalRecordCount: 501,
+      });
+    return json({ message: "private-upstream-text" }, 401);
+  };
+  const h = await harness(fetcher);
+  t.after(async () => {
+    await h.app.close();
+    h.store.close();
+  });
+  const session = await h.login("admin", "admin-password");
+  const headers = webHeaders(session);
+  const userID = session.json().user.id;
+  h.store.putSecret(
+    "installation",
+    "settings",
+    JSON.stringify({
+      ...h.store.settings(),
+      jellyfinURL: "https://jelly.test",
+    }),
+  );
+  h.store.putSecret(
+    userID,
+    "jellyfin",
+    JSON.stringify({ token: "synthetic-token", userID: "synthetic-user" }),
+  );
+  h.store.putSecret(
+    userID,
+    "lastfm",
+    JSON.stringify({ username: "synthetic-user", apiKey: "synthetic-key" }),
+  );
+  const load = () => h.inject({ url: "/api/v1/recommendations", headers });
+  const empty = await load();
+  assert.equal(empty.statusCode, 200);
+  assert.deepEqual(empty.json(), {
+    items: [],
+    source: "lastfm",
+    emptyReason: "no_candidates",
+  });
+  assert.equal(
+    jellyCalls,
+    0,
+    "No ownership check is needed without candidates",
+  );
+  for (mode of ["candidates", "partial"]) {
+    const denied = await load();
+    assert.equal(denied.statusCode, 502);
+    assert.equal(denied.json().error.code, "jellyfin_filter_failed");
+    assert.match(denied.json().error.message, /Jellyfin library filtering/);
+    assert.match(denied.json().error.message, /HTTP 401/);
+    assert.equal(
+      denied.json().items,
+      undefined,
+      "Never publish unverified or partially filtered candidates",
+    );
+  }
+  for (mode of ["lastfm401", "lastfmApi", "musicbrainz401"]) {
+    const before: number = jellyCalls;
+    const denied = await load();
+    assert.equal(denied.statusCode, 502);
+    assert.match(
+      denied.json().error.message,
+      mode === "musicbrainz401" ? /MusicBrainz/ : /Last.fm/,
+    );
+    assert.equal(denied.json().items, undefined);
+    assert.doesNotMatch(
+      denied.body,
+      /private-upstream-text|synthetic-key|synthetic-token/,
+    );
+    assert.equal(
+      jellyCalls,
+      before,
+      "Candidate-source failures must not be blamed on Jellyfin",
+    );
+  }
+  mode = "owned";
+  assert.deepEqual((await load()).json(), {
+    items: [],
+    source: "lastfm",
+    emptyReason: "all_excluded",
+  });
+  await h.inject({
+    method: "DELETE",
+    url: "/api/v1/connections/jellyfin",
+    headers,
+  });
+  mode = "candidates";
+  const before = jellyCalls;
+  const unfiltered = await load();
+  assert.equal(unfiltered.statusCode, 200);
+  assert.equal(
+    unfiltered.json().items[0].id,
+    identities.album.releaseGroupMBID,
+  );
+  assert.equal(unfiltered.json().emptyReason, null);
+  assert.equal(jellyCalls, before);
+});
+
+test("saved Jellyfin tokens use modern authorization after login and stay user-scoped", async (t) => {
+  let itemCalls = 0;
+  const h = await harness(async (input, init) => {
+    assert.ok(input instanceof URL);
+    assert.equal(input.hostname, "jelly.test");
+    assert.equal(init?.redirect, "manual");
+    if (input.pathname === "/Users/AuthenticateByName")
+      return Response.json({
+        AccessToken: "issued-token",
+        User: { Id: "remote-user-id" },
+      });
+    assert.equal(input.pathname, "/Items");
+    assert.equal(input.searchParams.get("userId"), "remote-user-id");
+    assert.equal(input.searchParams.has("api_key"), false);
+    const headers = new Headers(init?.headers);
+    // Jellyfin 12 disables legacy X-Emby-Token authentication by default.
+    if (headers.get("Authorization") !== 'MediaBrowser Token="issued-token"')
+      return new Response(null, { status: 401 });
+    assert.equal(headers.has("X-Emby-Token"), false);
+    itemCalls++;
+    return Response.json({
+      Items: [{ Id: "one", Name: "Saved-token album" }],
+      TotalRecordCount: 1,
+    });
+  });
+  t.after(async () => {
+    await h.app.close();
+    h.store.close();
+  });
+  h.store.putSecret(
+    "installation",
+    "settings",
+    JSON.stringify({
+      ...h.store.settings(),
+      jellyfinURL: "https://jelly.test",
+    }),
+  );
+  const headers = webHeaders(await h.login("admin", "admin-password"));
+  assert.equal(
+    (
+      await h.inject({
+        method: "PUT",
+        url: "/api/v1/connections/jellyfin",
+        headers,
+        payload: { username: "remote", password: "synthetic-password" },
+      })
+    ).statusCode,
+    200,
+  );
+  const library = await h.inject({ url: "/api/v1/library", headers });
+  assert.equal(library.statusCode, 200);
+  assert.equal(library.json().items[0].title, "Saved-token album");
+  assert.doesNotMatch(library.body, /issued-token|remote-user-id/);
+  await h.inject({
+    method: "POST",
+    url: "/api/v1/admin/users",
+    headers,
+    payload: {
+      username: "member",
+      password: "member-password",
+      role: "member",
+    },
+  });
+  const member = webHeaders(await h.login("member", "member-password"));
+  assert.equal(
+    (await h.inject({ url: "/api/v1/library", headers: member })).statusCode,
+    409,
+  );
+  assert.equal(itemCalls, 1);
+});
+
+test("Jellyfin ownership failure prevents acquisition creation", async (t) => {
+  const h = await harness();
+  t.after(async () => {
+    await h.app.close();
+    h.store.close();
+  });
+  const session = await h.login("admin", "admin-password");
+  const headers = webHeaders(session);
+  h.store.putSecret(
+    "installation",
+    "settings",
+    JSON.stringify({
+      ...h.store.settings(),
+      jellyfinURL: "https://jelly.test",
+      lidarrURL: "https://lidarr.test",
+      lidarrKey: "synthetic-key",
+    }),
+  );
+  h.store.putSecret(
+    session.json().user.id,
+    "jellyfin",
+    JSON.stringify({ token: "synthetic-token", userID: "remote-user" }),
+  );
+  h.upstream.jellyfinLibrary = async () => {
+    throw new UpstreamError("upstream_auth", 502);
+  };
+  assert.equal(
+    (
+      await h.inject({
+        method: "POST",
+        url: "/api/v1/requests",
+        headers,
+        payload: { ...identities.album, confirmed: true },
+      })
+    ).statusCode,
+    502,
+  );
+  assert.deepEqual(
+    h.store.db.prepare("SELECT COUNT(*) AS count FROM acquisitions").get(),
+    { count: 0 },
+  );
 });
 
 test("fixture mode is explicit and rejects service credentials before upstream calls", async (t) => {

@@ -163,7 +163,10 @@ const jellyPageSchema = z
   .passthrough();
 
 const mbArtistCredit = z
-  .object({ artist: z.object({ id, name: safeString }).passthrough() })
+  .object({
+    name: safeString.optional(),
+    artist: z.object({ id, name: safeString }).passthrough(),
+  })
   .passthrough();
 const mbGroup = z
   .object({
@@ -191,22 +194,56 @@ function headers(values: Record<string, string>): Headers {
   for (const [key, value] of Object.entries(values)) result.set(key, value);
   return result;
 }
-function classify(status: number): never {
+function classify(status: number, service = "The upstream service"): never {
   if (status === 401)
     throw new UpstreamError(
       "upstream_auth",
       502,
-      "The upstream service returned HTTP 401 (unauthorized). Check the account or API key and any proxy authentication requirements.",
+      `${service} returned HTTP 401 (unauthorized). Check the account or API key and any proxy authentication requirements.`,
     );
   if (status === 403)
     throw new UpstreamError(
       "upstream_auth",
       502,
-      "The upstream service returned HTTP 403 (forbidden). Check account permissions, remote-access policy, and proxy access rules; this does not necessarily mean the password is wrong.",
+      `${service} returned HTTP 403 (forbidden). Check account permissions, remote-access policy, and proxy access rules; this does not necessarily mean the password is wrong.`,
     );
   if (status >= 500 || status === 429)
     throw new UpstreamError("upstream_unavailable", 503);
   throw new UpstreamError("upstream_protocol", 502);
+}
+
+// Quote each literal term so user/provider names cannot become Lucene operators.
+function searchTerms(value: string): string {
+  return value
+    .trim()
+    .split(/\s+/u)
+    .map((term) => `"${term.replace(/[\\"]/g, "\\$&")}"`)
+    .join(" AND ");
+}
+
+type ResolvedAlbum = {
+  id: string;
+  title: string;
+  artist: string;
+  artistMBID: string;
+  coverUrl?: string;
+};
+const lastfmImages = z
+  .array(z.object({ size: z.string(), "#text": z.string() }))
+  .default([]);
+function lastfmCover(images: z.infer<typeof lastfmImages>): string | undefined {
+  for (const size of ["extralarge", "large", "medium", "small"]) {
+    const image = images.find((candidate) => candidate.size === size);
+    // Browser-only image URLs, never an arbitrary server-side fetch/proxy.
+    if (
+      image &&
+      /^https:\/\/lastfm-img\.freetls\.fastly\.net\/i\/u\/[a-zA-Z0-9/_-]+\.(?:jpg|jpeg|png|webp)$/.test(
+        image["#text"],
+      )
+    )
+      return image["#text"];
+  }
+  return undefined;
 }
 
 export class Upstreams {
@@ -218,6 +255,16 @@ export class Upstreams {
     init: RequestInit = {},
     lastfmErrors = false,
   ): Promise<JsonValue> {
+    const service =
+      url.hostname === "ws.audioscrobbler.com"
+        ? "Last.fm"
+        : url.hostname === "musicbrainz.org"
+          ? "MusicBrainz"
+          : new Headers(init.headers)
+                .get("Authorization")
+                ?.startsWith("MediaBrowser ")
+            ? "Jellyfin"
+            : "The upstream service";
     if (url.hostname === "musicbrainz.org") {
       const delay = Math.max(0, this.musicBrainzNext - Date.now());
       if (delay > 30_000) throw new UpstreamError("upstream_unavailable", 503);
@@ -235,19 +282,19 @@ export class Upstreams {
       });
       if (response.status >= 300 && response.status < 400)
         throw new UpstreamError("upstream_protocol", 502);
-      if (!response.ok && !lastfmErrors) classify(response.status);
+      if (!response.ok && !lastfmErrors) classify(response.status, service);
       const bytes = await this.boundedBody(response, 2_000_000);
       const body = z.json().parse(JSON.parse(new TextDecoder().decode(bytes)));
       if (
         !response.ok &&
         !z.object({ error: z.number().int() }).safeParse(body).success
       )
-        classify(response.status);
+        classify(response.status, service);
       return body;
     } catch (error) {
       if (error instanceof UpstreamError) throw error;
       if (error instanceof SyntaxError) {
-        if (response && !response.ok) classify(response.status);
+        if (response && !response.ok) classify(response.status, service);
         throw new UpstreamError(
           "upstream_protocol",
           502,
@@ -355,7 +402,9 @@ export class Upstreams {
     const page = this.parse(
       jellyPageSchema,
       await this.request(url, {
-        headers: headers({ "X-Emby-Token": token }),
+        headers: headers({
+          Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+        }),
       }),
     );
     const items: Album[] = [];
@@ -379,7 +428,11 @@ export class Upstreams {
           endpoint,
           `Users/${encodeURIComponent(userID)}/Items/${encodeURIComponent(albumID)}`,
         ),
-        { headers: headers({ "X-Emby-Token": token }) },
+        {
+          headers: headers({
+            Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+          }),
+        },
       ),
     );
     if (album.Id !== albumID || album.Type !== "MusicAlbum")
@@ -402,7 +455,9 @@ export class Upstreams {
       const page = this.parse(
         jellyPageSchema,
         await this.request(url, {
-          headers: headers({ "X-Emby-Token": token }),
+          headers: headers({
+            Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+          }),
         }),
       );
       for (const item of page.Items) tracks.push(this.track(item));
@@ -429,7 +484,11 @@ export class Upstreams {
           endpoint,
           `Users/${encodeURIComponent(userID)}/Items/${encodeURIComponent(trackID)}`,
         ),
-        { headers: headers({ "X-Emby-Token": token }) },
+        {
+          headers: headers({
+            Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+          }),
+        },
       ),
     );
     if (item.Type !== "Audio" || item.Id !== trackID)
@@ -451,7 +510,9 @@ export class Upstreams {
           `Users/${encodeURIComponent(userID)}/Items/${encodeURIComponent(itemID)}`,
         ),
         {
-          headers: headers({ "X-Emby-Token": token }),
+          headers: headers({
+            Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+          }),
         },
       ),
     );
@@ -461,7 +522,9 @@ export class Upstreams {
       response = await this.fetcher(
         pathURL(endpoint, `Items/${encodeURIComponent(itemID)}/Images/Primary`),
         {
-          headers: headers({ "X-Emby-Token": token }),
+          headers: headers({
+            Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
+          }),
           redirect: "manual",
           signal: AbortSignal.timeout(10_000),
         },
@@ -508,7 +571,7 @@ export class Upstreams {
   ): Promise<Response> {
     await this.jellyfinTrack(endpoint, token, userID, trackID); // A user-scoped lookup is the authorization check.
     const requestHeaders = headers({
-      "X-Emby-Token": token,
+      Authorization: `MediaBrowser Token=${JSON.stringify(token)}`,
       "Accept-Encoding": "identity",
     });
     if (range) requestHeaders.set("Range", range);
@@ -820,18 +883,118 @@ export class Upstreams {
     ).id;
   }
 
-  async resolve(q: string): Promise<{
-    items: Array<{
-      id: string;
-      title: string;
-      artist: string;
-      artistMBID: string;
-    }>;
+  async search(q: string, apiKey?: string) {
+    const terms = searchTerms(q);
+    const albums = await this.resolve(
+      `releasegroup:(${terms}) AND primarytype:album`,
+    );
+    const url = new URL("https://musicbrainz.org/ws/2/artist");
+    url.searchParams.set("query", terms);
+    url.searchParams.set("fmt", "json");
+    url.searchParams.set("limit", "10");
+    const page = this.parse(
+      z.object({
+        artists: z.array(
+          z.object({
+            id,
+            name: safeString,
+            disambiguation: z.string().default(""),
+            country: z.string().default(""),
+            type: z.string().default(""),
+          }),
+        ),
+      }),
+      await this.request(url, {
+        headers: headers({
+          "User-Agent": "Leerr/0.1 (https://github.com/leerr-app/leerr)",
+        }),
+      }),
+    );
+    if (apiKey && albums.items.length) {
+      try {
+        const matches = this.parse(
+          z.object({
+            results: z.object({
+              albummatches: z.object({
+                album: z.array(
+                  z.object({
+                    name: safeString,
+                    artist: safeString,
+                    image: lastfmImages,
+                  }),
+                ),
+              }),
+            }),
+          }),
+          await this.lastfm("album.search", apiKey, { album: q, limit: "30" }),
+        );
+        for (const item of albums.items) {
+          const match = matches.results.albummatches.album.find(
+            (candidate) =>
+              candidate.name.toLowerCase() === item.title.toLowerCase() &&
+              candidate.artist.toLowerCase() === item.artist.toLowerCase(),
+          );
+          if (match) item.coverUrl = lastfmCover(match.image);
+        }
+      } catch (error) {
+        // Optional artwork must not turn a valid MusicBrainz search into an error.
+        if (!(error instanceof UpstreamError)) throw error;
+      }
+    }
+    return { ...albums, artists: page.artists };
+  }
+
+  async artistAlbums(artist: string, offset: number, apiKey?: string) {
+    const artistID = id.parse(artist);
+    // Prefer official releases without removing bootlegs/other albums from paging.
+    const albums = await this.resolve(
+      `arid:${artistID} AND primarytype:album AND (status:official^5 OR primarytype:album)`,
+      offset,
+    );
+    if (apiKey && albums.items.length) {
+      try {
+        const covers = this.parse(
+          z.object({
+            topalbums: z.object({
+              album: z.array(
+                z.object({
+                  name: safeString,
+                  image: lastfmImages,
+                }),
+              ),
+            }),
+          }),
+          await this.lastfm("artist.getTopAlbums", apiKey, {
+            mbid: artistID,
+            limit: "100",
+          }),
+        );
+        for (const item of albums.items) {
+          const match = covers.topalbums.album.find(
+            (candidate) =>
+              candidate.name.toLowerCase() === item.title.toLowerCase(),
+          );
+          if (match) item.coverUrl = lastfmCover(match.image);
+        }
+      } catch (error) {
+        if (!(error instanceof UpstreamError)) throw error;
+      }
+    }
+    return albums;
+  }
+
+  async resolve(
+    q: string,
+    offset = 0,
+  ): Promise<{
+    total?: number;
+    items: ResolvedAlbum[];
   }> {
     const url = new URL("https://musicbrainz.org/ws/2/release-group");
     url.searchParams.set("query", q);
     url.searchParams.set("fmt", "json");
     url.searchParams.set("limit", "25");
+    url.searchParams.set("offset", String(offset));
     const page = this.parse(
       z
         .object({
@@ -847,15 +1010,15 @@ export class Upstreams {
     );
     const items = [];
     for (const group of page["release-groups"]) {
-      const credit = group["artist-credit"][0].artist;
+      const credit = group["artist-credit"][0];
       items.push({
         id: group.id,
         title: group.title,
-        artist: credit.name,
-        artistMBID: credit.id,
+        artist: credit.name ?? credit.artist.name,
+        artistMBID: credit.artist.id,
       });
     }
-    return { items };
+    return { items, total: page.count };
   }
 
   async editions(group: string): Promise<{
@@ -941,12 +1104,7 @@ export class Upstreams {
     username: string,
     apiKey: string,
   ): Promise<{
-    items: Array<{
-      id: string;
-      title: string;
-      artist: string;
-      artistMBID: string;
-    }>;
+    items: ResolvedAlbum[];
   }> {
     const seeds = this.parse(
       z.object({
@@ -962,12 +1120,7 @@ export class Upstreams {
         limit: "3",
       }),
     );
-    const items: Array<{
-      id: string;
-      title: string;
-      artist: string;
-      artistMBID: string;
-    }> = [];
+    const items: ResolvedAlbum[] = [];
     const seen = new Set<string>();
     for (const seed of seeds.topartists.artist.slice(0, 3)) {
       const similar = this.parse(
@@ -991,7 +1144,11 @@ export class Upstreams {
           z.object({
             topalbums: z.object({
               album: z
-                .array(z.object({ name: safeString }).passthrough())
+                .array(
+                  z
+                    .object({ name: safeString, image: lastfmImages })
+                    .passthrough(),
+                )
                 .default([]),
             }),
           }),
@@ -1003,9 +1160,13 @@ export class Upstreams {
         for (const album of albums.topalbums.album.slice(0, 3)) {
           if (album.name === "(null)") continue;
           const resolved = await this.resolve(
-            `releasegroup:"${album.name}" AND artist:"${suggestion.name}"`,
+            `releasegroup:(${searchTerms(album.name)}) AND artist:(${searchTerms(suggestion.name)})`,
           );
-          if (resolved.items[0]) items.push(resolved.items[0]);
+          const match = resolved.items.find(
+            (item) => item.title.toLowerCase() === album.name.toLowerCase(),
+          );
+          if (match)
+            items.push({ ...match, coverUrl: lastfmCover(album.image) });
         }
       }
     }

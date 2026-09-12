@@ -1,4 +1,4 @@
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import helmet from "@fastify/helmet";
@@ -6,6 +6,8 @@ import staticFiles from "@fastify/static";
 import { hash, verify, argon2id } from "argon2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
+import { readFileSync } from "node:fs";
+import { extname, join } from "node:path";
 import { z } from "zod";
 import {
   Store,
@@ -102,6 +104,7 @@ export async function buildApp(options: {
           "https://coverartarchive.org",
           "https://archive.org",
           "https://*.archive.org",
+          "https://lastfm-img.freetls.fastly.net",
         ],
         styleSrc: ["'self'", "'unsafe-inline'"],
         scriptSrc: ["'self'"],
@@ -784,11 +787,28 @@ export async function buildApp(options: {
     },
   );
   app.get("/api/v1/resolve", async (request) => {
-    auth(request);
+    const { user } = auth(request);
     const { q } = z
-      .object({ q: z.string().min(1).max(200) })
+      .object({ q: z.string().trim().min(1).max(200) })
       .parse(request.query);
-    return upstream.resolve(q);
+    return upstream.search(
+      q,
+      store.secret(user.id, "lastfm", lastSchema)?.apiKey,
+    );
+  });
+  app.get("/api/v1/artists/:id/albums", async (request) => {
+    const { user } = auth(request);
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { offset } = z
+      .object({
+        offset: z.coerce.number().int().min(0).max(10000).default(0),
+      })
+      .parse(request.query);
+    return upstream.artistAlbums(
+      id,
+      offset,
+      store.secret(user.id, "lastfm", lastSchema)?.apiKey,
+    );
   });
   app.get("/api/v1/resolve/:id/editions", async (request) => {
     auth(request);
@@ -798,9 +818,12 @@ export async function buildApp(options: {
   app.get("/api/v1/recommendations", async (request) => {
     const { user } = auth(request),
       last = store.secret(user.id, "lastfm", lastSchema);
+    const source = last ? "lastfm" : "musicbrainz";
     const page = last
       ? await upstream.recommendations(last.username, last.apiKey)
       : await upstream.resolve("primarytype:album AND status:official");
+    if (!page.items.length)
+      return { items: [], source, emptyReason: "no_candidates" };
     const excluded = new Set(
       z
         .array(z.object({ releaseGroupMBID: z.string() }))
@@ -813,10 +836,24 @@ export async function buildApp(options: {
         )
         .map((row) => row.releaseGroupMBID),
     );
-    if (store.secret(user.id, "jellyfin", jellySchema))
-      for (const album of await inventory(user.id))
+    if (store.secret(user.id, "jellyfin", jellySchema)) {
+      let albums: Album[];
+      try {
+        albums = await inventory(user.id);
+      } catch (error) {
+        if (error instanceof UpstreamError || error instanceof APIError)
+          throw new APIError(
+            error.status,
+            "jellyfin_filter_failed",
+            `Jellyfin library filtering failed. Recommendations are withheld because library ownership could not be checked. Review your Jellyfin connection in Settings. ${error.message}`,
+          );
+        throw error;
+      }
+      for (const album of albums)
         if (album.releaseGroupMBID) excluded.add(album.releaseGroupMBID);
-    return { items: page.items.filter((item) => !excluded.has(item.id)) };
+    }
+    const items = page.items.filter((item) => !excluded.has(item.id));
+    return { items, source, emptyReason: items.length ? null : "all_excluded" };
   });
   app.post("/api/v1/requests", async (request) => {
     const { user } = auth(request),
@@ -946,14 +983,28 @@ export async function buildApp(options: {
     return {};
   });
   if (options.webRoot) {
-    await app.register(staticFiles, { root: options.webRoot });
-    app.setNotFoundHandler((request, reply) =>
-      request.url.startsWith("/api/")
-        ? reply.code(404).send({
-            error: { code: "not_found", message: "Route not found." },
-          })
-        : reply.sendFile("index.html"),
-    );
+    // Serve HTML directly: Nix-normalized mtimes make equal-size builds share
+    // static-file validators even when their hashed asset references changed.
+    const html = readFileSync(join(options.webRoot, "index.html"), "utf8");
+    const sendIndex = (reply: FastifyReply) =>
+      reply.type("text/html").header("Cache-Control", "no-store").send(html);
+    for (const path of ["/", "/index.html"])
+      app.get(path, (_request, reply) => sendIndex(reply));
+    await app.register(staticFiles, { root: options.webRoot, index: false });
+    app.setNotFoundHandler((request, reply) => {
+      const path = request.url.split("?", 1)[0];
+      if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        request.headers.accept?.includes("text/html") &&
+        !path.startsWith("/api/") &&
+        !path.startsWith("/assets/") &&
+        !extname(path)
+      )
+        return sendIndex(reply);
+      return reply.code(404).send({
+        error: { code: "not_found", message: "Route not found." },
+      });
+    });
   }
   app.addHook("onClose", async () => {
     for (const id of streams.keys()) abortSession(id);
