@@ -2,6 +2,8 @@ services:
   leerr:
     build: .
     restart: unless-stopped
+    # Lets an in-flight Lidarr call finish before the container is killed.
+    stop_grace_period: 60s
     ports:
       - "127.0.0.1:3000:3000"
     environment:

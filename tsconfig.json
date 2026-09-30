@@ -1,8 +1,16 @@
 {
   "compilerOptions": {
-    "target": "ES2024", "module": "NodeNext", "moduleResolution": "NodeNext",
-    "strict": true, "noEmit": true, "esModuleInterop": true, "skipLibCheck": true,
-    "allowImportingTsExtensions": true, "types": ["node"]
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": false,
+    "types": ["node"]
   },
   "include": ["server/**/*.ts"]
 }

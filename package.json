@@ -3,16 +3,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx server/main.ts",
-    "build": "tsc --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
-    "start": "tsx server/main.ts",
-    "test": "node --import tsx --test server/*.test.ts",
+    "start": "node server/main.ts",
+    "preview": "npm run build:web && node server/preview.ts",
+    "operator": "node server/operator.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "build": "npm run typecheck && npm run build:web",
+    "build:web": "vite build --config web/vite.config.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "test": "node --test --test-reporter=spec \"server/**/*.test.ts\"",
     "lint": "oxlint --threads 1 --deny-warnings --config oxlint.config.ts server web && node scripts/check-anti-slop.mjs",
-    "preview": "tsx server/preview.ts",
-    "operator": "tsx server/operator.ts"
+    "check": "npm run lint && npm run typecheck && npm test && npm run build:web"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=24"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
@@ -25,7 +28,6 @@
     "lucide-react": "1.43.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "tsx": "4.23.13",
     "zod": "4.5.4"
   },
   "devDependencies": {

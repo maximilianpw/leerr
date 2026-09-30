@@ -1,109 +1,74 @@
-# Development and verification
+# Development
 
-## Server and web
-
-Use Node.js 22.13 or newer. Package versions are exactly pinned in
-`package-lock.json`.
+Requires Node.js 24+ (the server runs TypeScript directly with Node's type
+stripping). Dependency versions are pinned in `package-lock.json`.
 
 ```sh
 npm ci
-npm run lint
-node scripts/check-anti-slop.mjs
-npm test
-npm run build
+npm run check        # lint, typecheck, tests, web build
 ```
 
-Oxlint 1.82.0 and `@oxlint/plugins` 1.82.0 must remain matched. The supported
-JavaScript-plugin integration enables all 17 vendored anti-slop general rules,
-plus native `oxc/no-accumulating-spread`. `tools/oxlint/README.md` records the
-pinned upstream revision and license provenance.
+Individual steps:
 
-### Constrained Linux lint workaround
+| Command | What it does |
+|---|---|
+| `npm run lint` | Oxlint with the vendored anti-slop rules, then a probe proving the plugin is active |
+| `npm run typecheck` | `tsc` for the server (`tsconfig.json`) and the web app (`web/tsconfig.json`) |
+| `npm test` | Every `server/**/*.test.ts` with `node --test` |
+| `npm run build` | Typecheck, then build the web app to `dist/web` |
+| `npm run preview` | Build the web app and serve it with fake services on port 3000 |
+| `npm run dev:web` | Vite with hot reload on port 5173, proxying `/api` to a running preview |
 
-The Oxlint plugin can reserve roughly 4 GiB of aligned virtual address space per
-thread due to [oxc-project/oxc#20331](https://github.com/oxc-project/oxc/issues/20331)
-and [#22966](https://github.com/oxc-project/oxc/issues/22966). A small, swapless
-Linux orb with `vm.overcommit_memory=0` can reject that reservation even though
-the memory is virtual. Inspect before diagnosing:
+For UI work, run `npm run preview` in one terminal and `npm run dev:web` in
+another. To show the preview on another device, set
+`LEERR_PREVIEW_ORIGIN=http://<host>:3000 HOST=0.0.0.0`. Set
+`LEERR_PREVIEW_SETUP=1` to start the preview empty, at the setup screen (token
+`preview-setup-token`).
 
-```sh
-grep -E 'MemTotal|SwapTotal' /proc/meminfo
-sysctl vm.overcommit_memory
-```
+## Tests
 
-Prefer a supported environment with sufficient VM capacity/swap. For an
-isolated disposable orb, an administrator may explicitly choose
-`sudo sysctl -w vm.overcommit_memory=1`; that was done in this orb. This is not
-a universal Node/macOS requirement, is not needed by the production runtime,
-and lint scripts must never silently change a host sysctl.
+Tests use in-memory SQLite and `FakeUpstreams` (`server/testing.ts`), and never
+touch the network. `server/test/harness.ts` builds an app with a controllable
+clock and helpers to create users and sign in.
 
-## Swift and Apple clients
+| File | Covers |
+|---|---|
+| `auth.test.ts` | Setup, host/origin/HTTPS checks, cookies, CSRF, bearer sessions, throttling, user administration |
+| `api.test.ts` | Connections, library isolation, requests, discovery, admin settings |
+| `acquisitions.test.ts` | The Lidarr state machine: unknown-outcome mutations, grace periods, deadlines, retries |
+| `streams.test.ts` | Range/416, ticket admission, revocation aborting live streams, stream limits |
+| `upstream.test.ts` | Wire contracts for Jellyfin, Lidarr, MusicBrainz and Last.fm against stub `fetch` |
+| `store.test.ts` | Encryption, schema versioning, compare-and-set updates, the operator CLI |
+| `static.test.ts` | Web asset caching and the single-page-app fallback |
+| `contract.test.ts` | Every API route matches `docs/openapi.yaml`, in both directions |
 
-Run shared tests with the reference Swift 6.0.3 toolchain:
+Adding an API route means documenting it in `docs/openapi.yaml`; the contract
+test fails otherwise.
 
-```sh
-swift test
-```
+## Lint
 
-For native apps use macOS, Xcode 16.2+ (with the desired iOS Simulator), and
-XcodeGen 2.42+:
+Oxlint 1.82.0 and `@oxlint/plugins` 1.82.0 must stay at the same version. The
+anti-slop rules (`tools/oxlint/`, vendored with provenance in its README)
+enforce, among other things:
 
-```sh
-./scripts/check
-open Leerr.xcodeproj
-```
+- external input is parsed with zod at its boundary (no `typeof` checks and no
+  `unknown` parameters except ones named `cause`);
+- no chained `.filter().map()`;
+- every `as` cast carries a `// SAFETY:` comment.
 
-`project.yml` is authoritative; do not commit generated Xcode projects or local
-signing settings. The native clients now sign into Leerr and store only their
-Leerr bearer session in its Keychain namespace. Earlier direct Jellyfin,
-Navidrome, Lidarr, and Last.fm adapters/tests remain in the tree, but current app
-composition does not migrate or remove those credentials.
+The Oxlint JS plugin reserves several GiB of virtual memory per thread
+([oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). On a small,
+swapless Linux VM with `vm.overcommit_memory=0` it can fail to start. Use a
+machine with more headroom rather than changing host settings from scripts.
 
-Native verification runs in [the Mac runner thread](https://ampcode.com/threads/T-01a086f7-17ca-7188-8aae-9764a3ba593f).
-Final source passed 107 Swift tests and both unsigned builds on macOS 27/Xcode
-26.5. Final XCTest runs each had 1 pass and 1 failure: Mac lost the app window
-after relaunch; iPhone Simulator computed an invalid Discover tap point after
-Library. Mac signed-out tabs and iPhone login/errors were exercised; final
-iPhone Discover/Requests were not reached. Earlier 2/2 passes on each platform
-are not a final-source pass. Authenticated UI/races need a trusted TLS fixture.
-Do not treat Linux
-`swift test`, an Xcode compile, or Simulator screenshots as real-device audio
-acceptance. Before release, verify both app targets and representative UI states
-on a Mac, then test original streaming, Range seeking, ticket refresh,
-interruptions, routes, background controls, and network loss on real iPhone and
-Mac hardware. Record OS/device, upstream versions, and fixture characteristics,
-without secrets or ticket URLs. Live upstream credentials and hardware were not
-provided for the current verification.
+## Conventions
 
-## Current verification boundary
-
-`npm test` passed 27 tests; `npm run lint` passed including the deliberate
-anti-slop rejection probe; `npm run build` passed strict TypeScript and Vite.
-Tests cover encrypted backup/reopen, v1 migration, reset/rotation, permission
-isolation, uncertain mutation reconciliation, and synthetic FLAC full/range/416
-responses and streaming cancellation. Docker image construction, UID 1000
-startup, first-account setup, and account persistence after restart passed.
-Chromium setup/login/settings/library/album/edition/request success and progress,
-empty/error, and narrow states were rendered and inspected. Dialog modal/focus
-and Escape behavior were checked; narrow Chromium is not native iOS verification.
-Production restore drills, live upstream compatibility and real-device playback
-remain release gates in the [plan](shared-server-plan.md).
-
-Artwork delivery is implemented through the authenticated, no-store
-`/api/v1/artwork/:id` proxy. A test verifies per-user Jellyfin item authorization
-precedes image retrieval, successful PNG bytes match exactly, and anonymous or
-upstream-denied requests never retrieve the image. The preview uses three
-original synthetic geometric PNG covers in `server/fixtures/cover-*.png`, drawn
-locally with ImageMagick (no external artwork or personal data), and deliberately
-omits the final cover to exercise fallback rendering. Repetition in the fixture
-is intentional, not an artwork lookup limitation. Live Jellyfin is unverified.
-
-### Bundled font provenance
-
-`web/src/fonts/InterVariable.woff2` was downloaded on 2026-09-09 from
-`https://github.com/rsms/inter/raw/master/docs/font-files/InterVariable.woff2`.
-It is the master docs WOFF2 (352240 bytes, font-file version 4.66), not the
-tagged 4.1 release archive. SHA-256:
-`693b77d4f32ee9b8bfc995589b5fad5e99adf2832738661f5402f9978429a8e3`.
-The complete upstream SIL OFL 1.1 copyright/license is bundled beside it in
-`web/src/fonts/LICENSE.txt`.
+- All SQL lives in `server/store.ts`. Acquisition updates go through
+  `updateAcquisition`, which is compare-and-set.
+- Upstream code throws `UpstreamError` with an `outcome`, which the worker uses
+  to decide whether a failed change is safe to repeat.
+- API errors are `APIError(status, code, message)`. Messages are shown to users
+  verbatim, so write them for people.
+- The web app reads URLs from `useLocation()`, loads data with `useResource`
+  (abortable; stale responses are ignored) and writes with `useAction` (ignores
+  double submits). A 401 from any request signs the user out.

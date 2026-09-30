@@ -1,89 +1,62 @@
+/**
+ * Offline maintenance. Stop Leerr first: these commands do not coordinate
+ * with a running server. Passwords are read from stdin, never argv.
+ */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { deployment } from "./config.ts";
-import { Store, userSchema } from "./store.ts";
-import { passwordHash } from "./app.ts";
+import { readKey } from "./config.ts";
+import { hashPassword } from "./passwords.ts";
+import { Store } from "./store.ts";
 
-// Offline operation only: stop Leerr first. No passwords in argv/history.
+const usage = `Usage (with Leerr stopped; LEERR_DATA and LEERR_KEY_FILE set as for the server):
+  leerr-operator reset-password USER < password-file   Set a password, re-enable the user, end their sessions
+  leerr-operator backup DESTINATION                    Consistent copy of the database (key not included)
+  leerr-operator rotate-key NEW_KEY_FILE               Re-encrypt secrets under a new key and end all sessions
+`;
+
 const [command, argument] = process.argv.slice(2);
-const config = deployment();
-const store = new Store(resolve(config.data, "leerr.sqlite"), config.key);
+if (!command || !argument) {
+  process.stderr.write(usage);
+  process.exit(2);
+}
+process.umask(0o077);
+const store = new Store(
+  resolve(process.env.LEERR_DATA ?? "data", "leerr.sqlite"),
+  readKey(z.string().min(1).parse(process.env.LEERR_KEY_FILE)),
+);
 try {
   if (command === "reset-password") {
-    const password = z
-      .string()
-      .min(10)
-      .max(256)
-      .parse(readFileSync(0, "utf8").trim());
-    const user = userSchema.parse(
-      store.db.prepare("SELECT * FROM users WHERE username=?").get(argument),
-    );
-    const encoded = await passwordHash(password);
-    store.db.transaction(() => {
-      store.db
-        .prepare("UPDATE users SET password=?,disabled=0 WHERE id=?")
-        .run(encoded, user.id);
-      store.db.prepare("DELETE FROM sessions WHERE userID=?").run(user.id);
-    })();
-    process.stdout.write("Password reset and sessions revoked.\n");
+    const password = z.string().min(10).max(256).parse(readFileSync(0, "utf8").replace(/\r?\n$/, ""));
+    const user = store.userByName(argument);
+    if (!user) throw new Error("No such user.");
+    const hashed = await hashPassword(password);
+    store.transaction(() => {
+      store.updateUser(user.id, { passwordHash: hashed, disabled: false });
+      store.deleteUserSessions(user.id);
+    });
+    process.stdout.write("Password reset; the user is enabled and their sessions have ended.\n");
   } else if (command === "backup") {
-    await store.db.backup(z.string().min(1).parse(argument));
-    process.stdout.write(
-      "Database backup complete. Protect the encryption key separately.\n",
-    );
+    await store.db.backup(resolve(argument));
+    process.stdout.write("Backup complete. Store the encryption key separately.\n");
   } else if (command === "rotate-key") {
-    const newKey = Buffer.from(
-      readFileSync(z.string().min(1).parse(argument), "utf8").trim(),
-      "base64",
-    );
-    const next = new Store(":memory:", newKey);
+    const next = new Store(":memory:", readKey(argument));
     try {
-      const rows = z
-        .array(
-          z.object({
-            owner: z.string(),
-            service: z.string(),
-            value: z.string(),
-          }),
-        )
-        .parse(store.db.prepare("SELECT * FROM secrets").all());
-      store.db.transaction(() => {
-        for (const row of rows)
-          store.db
-            .prepare("UPDATE secrets SET value=? WHERE owner=? AND service=?")
-            .run(
-              next.encrypt(
-                row.owner,
-                row.service,
-                store.decrypt(row.owner, row.service, row.value),
-              ),
-              row.owner,
-              row.service,
-            );
-        store.db.prepare("DELETE FROM sessions").run();
-      })();
+      const count = store.reencrypt(next);
+      store.deleteAllSessions();
+      process.stdout.write(
+        `Re-encrypted ${count} secrets. Point LEERR_KEY_FILE at the new key before starting Leerr; keep the old key for old backups.\n`,
+      );
     } finally {
       next.close();
     }
-    process.stdout.write(
-      "Database re-encrypted. Set LEERR_KEY_FILE to the new key before restarting. Retain the old key with old backups.\n",
-    );
-  } else if (command === "keygen") {
-    // Key creation is deliberately separate from DB startup to prevent lost-key replacement.
-    throw new Error(
-      "Generate a key before startup with openssl rand -base64 32 > key-file.",
-    );
   } else {
-    process.stderr.write(
-      "Usage (server stopped): operator reset-password USER < password-file | backup DESTINATION | rotate-key NEW_KEY_FILE\n",
-    );
-    process.exitCode = 1;
+    process.stderr.write(usage);
+    process.exitCode = 2;
   }
-} catch {
-  process.stderr.write(
-    "Operator command failed. Check inputs, key and database; no secret details were logged.\n",
-  );
+} catch (cause) {
+  // Messages here never contain secrets: inputs are validated, not echoed.
+  process.stderr.write(`Operator command failed: ${cause instanceof Error ? cause.message : "unknown error"}\n`);
   process.exitCode = 1;
 } finally {
   store.close();
