@@ -11,7 +11,7 @@ try {
   const output = result.stdout + result.stderr;
   if (result.status !== 1 || !output.includes('no-array-filter-map')) {
     process.stderr.write(output);
-    throw new Error('Anti-slop activation check failed. See docs/server-development.md for constrained Linux allocator prerequisites.');
+    throw new Error('Anti-slop activation check failed. See docs/development.md#lint for the memory the Oxlint plugin needs.');
   }
   process.stdout.write('PASS: anti-slop/no-array-filter-map rejects a deliberate violation.\n');
 } finally { rmSync(directory, { recursive: true, force: true }); }

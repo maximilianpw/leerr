@@ -3,8 +3,8 @@
 The flake packages the server and the built web app for `x86_64-linux`. It
 provides no NixOS module and never activates anything by itself.
 
-`nix/package.nix` builds with Node 24. The build runs the full lint and test
-suite, then installs:
+`nix/package.nix` builds with Node 24. The build runs the test suite, then
+installs:
 
 - `bin/leerr`: the server (`server/main.ts`);
 - `bin/leerr-operator`: offline maintenance (see [deployment.md](deployment.md));
@@ -26,11 +26,19 @@ store before the package's source filter runs, so never build from a checkout
 that contains keys, `.env` files or data directories. `.#leerr` in a Git
 checkout only sees tracked files.
 
-After changing `package-lock.json`, update `npmDepsHash`:
+After changing `package-lock.json` (including its version), update `npmDepsHash`:
 
 ```sh
 nix run nixpkgs#prefetch-npm-deps -- package-lock.json
 ```
+
+CI's `nix-deps` job builds `.#leerr.npmDeps` on every pull request, so a
+lockfile change (including Dependabot's) fails there until the hash follows.
+
+`nix flake check "path:$PWD"` also runs Oxlint with the anti-slop rules
+(`checks.x86_64-linux.lint`). Its plugin needs several GiB of memory (see
+[development.md](development.md#lint)), which is why it is not part of every
+package build.
 
 ## Use from another flake
 
@@ -63,10 +71,15 @@ use `${pkgs.leerr}/bin/leerr` as the service's `ExecStart`, with the environment
 from [deployment.md](deployment.md). Run it as a dedicated user with its own
 state directory, and give it the key file via systemd credentials or a
 root-owned file readable only by that user. Never put the key in a Nix
-expression or the Nix store.
+expression or the Nix store. For scheduled backups, set `LEERR_BACKUP_DIR` to a
+directory the service can write (for example under its `StateDirectory`) and
+copy it off the machine. Offline maintenance (`leerr-operator`) needs the service
+stopped: the running server holds the database.
 
 Updating the pin (`nix flake update leerr`) or building does not restart
-anything; deploying the new generation does. Rolling back a system generation
-does **not** roll back the database. In particular, this release refuses
-databases from the pre-refresh schema (see
-[deployment.md](deployment.md#upgrading-from-the-pre-refresh-leerr)).
+anything; deploying the new generation does. Leerr upgrades its database
+schema on start and keeps a copy of the old one; rolling back a system
+generation does **not** roll back the database. Restore that copy with the new
+generation's `leerr-operator` before switching back (see
+[rolling back](deployment.md#rolling-back)). Pre-refresh databases (schema 1–2)
+are refused.

@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import type { Session, Store, User } from "../store.ts";
+import { DEVICE_LIFETIME, digest, type Session, type Store, type User } from "../store.ts";
 import { APIError, unauthorized } from "./errors.ts";
 
 export const SESSION_LIFETIME = 30 * 86_400_000;
@@ -25,6 +25,7 @@ export class Auth {
   readonly #now: () => number;
   readonly #secure: boolean;
   readonly cookie: string;
+  readonly #deviceCookie: string;
 
   constructor(store: Store, now: () => number, secure: boolean) {
     this.#store = store;
@@ -32,6 +33,15 @@ export class Auth {
     this.#secure = secure;
     // __Host- cookies must be Secure, so plain-HTTP previews use a bare name.
     this.cookie = secure ? "__Host-leerr" : "leerr";
+    this.#deviceCookie = secure ? "__Host-leerr-device" : "leerr-device";
+  }
+
+  /** The signed-in user for rate limiting, without CSRF or role checks; null if none. */
+  userID(request: FastifyRequest): string | null {
+    const bearer = request.headers.authorization?.match(BEARER)?.[1];
+    const token = bearer ?? request.cookies[this.cookie];
+    const session = token ? this.#store.session(token, this.#now()) : undefined;
+    return session && session.device === (bearer ? "native" : "web") ? session.userID : null;
   }
 
   require(request: FastifyRequest, admin = false): Principal {
@@ -62,11 +72,37 @@ export class Auth {
   clearCookie(reply: FastifyReply) {
     reply.clearCookie(this.cookie, { path: "/", httpOnly: true, secure: this.#secure, sameSite: "strict" });
   }
+  /**
+   * One known-device cookie per account, so on a shared browser each person
+   * who signed in keeps their own budget against strangers' guesses.
+   */
+  deviceCookie(userID: string): string {
+    return `${this.#deviceCookie}-${digest(userID).slice(0, 16)}`;
+  }
+  /** Outlives sessions: signing out does not make a browser unknown. */
+  setDeviceCookie(reply: FastifyReply, userID: string, token: string) {
+    reply.setCookie(this.deviceCookie(userID), token, {
+      path: "/",
+      httpOnly: true,
+      secure: this.#secure,
+      sameSite: "strict",
+      maxAge: DEVICE_LIFETIME / 1000,
+    });
+  }
 }
 
-/** Per-username login failure throttle, complementing the per-IP rate limit. */
+/** One attempt in progress: it must end as a failure or be released. */
+export type Attempt = { failed: () => void; release: () => void };
+
+/**
+ * Failed-attempt throttle per key (an account, a known device, a member's
+ * Jellyfin sign-ins), complementing the per-IP rate limit. `limit` failures
+ * within `window` of the first lock the key for a full `window`. Attempts
+ * still being checked count against the limit, so a burst of concurrent
+ * guesses cannot slip past it.
+ */
 export class LoginThrottle {
-  readonly #failures = new Map<string, { count: number; since: number }>();
+  readonly #entries = new Map<string, { count: number; pending: number; since: number; lockedUntil: number }>();
   readonly #now: () => number;
   readonly #limit: number;
   readonly #window: number;
@@ -77,27 +113,49 @@ export class LoginThrottle {
     this.#window = window;
   }
 
-  #entry(username: string) {
-    const key = username.toLowerCase();
-    const entry = this.#failures.get(key);
-    if (entry && this.#now() - entry.since > this.#window) {
-      this.#failures.delete(key);
-      return undefined;
-    }
-    return entry;
+  #expired(entry: { since: number; lockedUntil: number; pending: number }) {
+    const now = this.#now();
+    return entry.pending === 0 && now >= entry.lockedUntil && now - entry.since > this.#window;
   }
-  blocked(username: string): boolean {
-    return (this.#entry(username)?.count ?? 0) >= this.#limit;
+  #entry(key: string) {
+    const name = key.toLowerCase();
+    const entry = this.#entries.get(name);
+    if (entry && !this.#expired(entry)) return entry;
+    const fresh = { count: 0, pending: 0, since: this.#now(), lockedUntil: 0 };
+    this.#entries.set(name, fresh);
+    if (this.#entries.size > 10_000)
+      for (const [other, value] of this.#entries) if (value !== fresh && this.#expired(value)) this.#entries.delete(other);
+    return fresh;
   }
-  failed(username: string) {
-    const entry = this.#entry(username);
-    if (entry) entry.count++;
-    else this.#failures.set(username.toLowerCase(), { count: 1, since: this.#now() });
-    if (this.#failures.size > 10_000)
-      for (const [key, value] of this.#failures)
-        if (this.#now() - value.since > this.#window) this.#failures.delete(key);
+  /** Starts an attempt, or returns null when the key is locked or out of attempts. */
+  begin(key: string): Attempt | null {
+    const entry = this.#entry(key);
+    const now = this.#now();
+    if (entry.lockedUntil > now || entry.count + entry.pending >= this.#limit) return null;
+    entry.pending++;
+    let settled = false;
+    const settle = () => {
+      if (settled) return false;
+      settled = true;
+      entry.pending--;
+      return true;
+    };
+    return {
+      failed: () => {
+        if (!settle()) return;
+        entry.count++;
+        const at = this.#now();
+        if (entry.count >= this.#limit && entry.lockedUntil <= at) entry.lockedUntil = at + this.#window;
+      },
+      release: () => void settle(),
+    };
   }
-  succeeded(username: string) {
-    this.#failures.delete(username.toLowerCase());
+  /** Forgets failures, e.g. after a successful sign-in or an administrator's password reset. */
+  clear(key: string) {
+    const entry = this.#entries.get(key.toLowerCase());
+    if (!entry) return;
+    entry.count = 0;
+    entry.lockedUntil = 0;
+    entry.since = this.#now();
   }
 }

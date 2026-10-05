@@ -12,6 +12,8 @@ test("the web build is served with an uncached shell, immutable assets and an SP
   writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>Leerr</title>");
   writeFileSync(join(webRoot, "assets", "app-abc123.js"), "console.log(1)");
   writeFileSync(join(webRoot, "assets", "font.woff2"), "font");
+  writeFileSync(join(webRoot, "manifest.webmanifest"), "{}");
+  writeFileSync(join(webRoot, "favicon.svg"), "<svg/>");
   const h = await harness(t, { webRoot });
   const html = { accept: "text/html" };
   const shell = await h.call("GET", "/", null, undefined, html);
@@ -28,4 +30,9 @@ test("the web build is served with an uncached shell, immutable assets and an SP
   assert.equal((await h.call("GET", "/assets/missing.js", null, undefined, html)).status, 404);
   assert.equal((await h.call("GET", "/api/v1/missing", null, undefined, html)).status, 404);
   assert.equal((await h.call("GET", "/albums/abc")).status, 404, "only navigations get the shell");
+  // Install files are served as themselves, never as the app shell.
+  const manifest = await h.call("GET", "/manifest.webmanifest", null, undefined, html);
+  assert.equal(manifest.headers["content-type"], "application/manifest+json");
+  assert.equal(manifest.body, "{}");
+  assert.equal((await h.call("GET", "/favicon.svg", null, undefined, html)).headers["content-type"], "image/svg+xml");
 });

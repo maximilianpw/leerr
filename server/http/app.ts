@@ -1,6 +1,6 @@
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
-import rateLimit from "@fastify/rate-limit";
+import rateLimit, { normalizeIP } from "@fastify/rate-limit";
 import staticFiles from "@fastify/static";
 import Fastify, { type FastifyReply } from "fastify";
 import { readFileSync } from "node:fs";
@@ -9,10 +9,11 @@ import { z } from "zod";
 import { Reconciler } from "../acquisitions.ts";
 import { LibraryIndex } from "../library.ts";
 import { silentLogger, type Logger } from "../log.ts";
+import { notificationListener } from "../notifications.ts";
 import type { Store } from "../store.ts";
 import { LiveUpstreams, UpstreamError, type Upstreams } from "../upstream/index.ts";
 import { Auth, LoginThrottle } from "./auth.ts";
-import type { AppContext } from "./context.ts";
+import type { AppContext, Runtime } from "./context.ts";
 import { APIError } from "./errors.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectionRoutes } from "./routes/connections.ts";
@@ -36,6 +37,7 @@ export type AppOptions = {
   /** Require HTTPS and Secure cookies. Only previews and tests disable this. */
   secure?: boolean;
   fixturePreview?: boolean;
+  runtime?: Runtime;
 };
 
 // Routes that establish or end sessions, or are authorised by a ticket.
@@ -46,6 +48,10 @@ const unauthenticated = new Set([
   "/api/v1/streams/:ticket",
 ]);
 const statusCode = z.object({ statusCode: z.number().int().min(400).max(499) });
+const rateLimitedCode = z.object({ statusCode: z.literal(429) });
+const retryAfter = z.coerce.number().int().positive().catch(60);
+/** The limiter's own window, so the message never promises a shorter wait than Retry-After. */
+const waitFor = (seconds: number) => (seconds <= 60 ? "a minute" : `${Math.ceil(seconds / 60)} minutes`);
 
 export async function buildApp(options: AppOptions) {
   const now = options.now ?? Date.now;
@@ -60,9 +66,12 @@ export async function buildApp(options: AppOptions) {
     log,
     auth: new Auth(options.store, now, secure),
     logins: new LoginThrottle(now),
+    jellyfinLogins: new LoginThrottle(now, 5),
+    passwordChecks: new LoginThrottle(now, 5),
     streams: new StreamRegistry(4),
     library: new LibraryIndex(upstream, now),
-    reconciler: new Reconciler(options.store, upstream, now, log),
+    reconciler: new Reconciler(options.store, upstream, now, log, notificationListener(options.store, upstream, log)),
+    runtime: options.runtime ?? { startedAt: now(), lastBackup: null },
     setupToken: options.setupToken,
     setupTokenFile: options.setupTokenFile ?? null,
     fixturePreview: options.fixturePreview === true,
@@ -92,24 +101,50 @@ export async function buildApp(options: AppOptions) {
     },
     strictTransportSecurity: secure,
   });
-  await app.register(rateLimit, { max: 300, timeWindow: "1 minute" });
+  // Signed-in traffic is limited per person: a household behind one address
+  // (or one IPv6 /64) must not share a single bucket.
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: "1 minute",
+    keyGenerator: (request) => {
+      const user = context.auth.userID(request);
+      return user ? `user:${user}` : normalizeIP(request.ip);
+    },
+  });
+
+  // One line per route and failure per minute: an outage must be visible without flooding the log.
+  const loggedUpstream = new Map<string, { at: number; suppressed: number }>();
+  const logUpstream = (route: string, error: UpstreamError) => {
+    if (error.code === "invalid_endpoint" || (error.code === "upstream_rejected" && error.status === 404)) return;
+    const key = `${route} ${error.code}`;
+    const seen = loggedUpstream.get(key);
+    if (seen && now() - seen.at < 60_000) {
+      seen.suppressed++;
+      return;
+    }
+    loggedUpstream.set(key, { at: now(), suppressed: 0 });
+    log("upstream_error", { route, code: error.code, status: error.status, message: error.message, suppressed: seen?.suppressed ?? 0 });
+  };
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof UpstreamError) logUpstream(request.routeOptions.url ?? "", error);
     if (error instanceof APIError || error instanceof UpstreamError)
       return reply.code(error.status).send({ error: { code: error.code, message: error.message } });
     if (error instanceof z.ZodError)
       return reply.code(400).send({
         error: { code: "invalid_request", message: error.issues[0]?.message ?? "Check the supplied fields." },
       });
+    if (rateLimitedCode.safeParse(error).success) {
+      const wait = waitFor(retryAfter.parse(reply.getHeader("retry-after")));
+      // Requests with a session are counted per person; others per client address.
+      const message = context.auth.userID(request)
+        ? `Too many requests. Try again in ${wait}.`
+        : `Too many attempts from your network. Try again in ${wait}.`;
+      return reply.code(429).send({ error: { code: "rate_limited", message } });
+    }
     const client = statusCode.safeParse(error);
     if (client.success)
-      return reply.code(client.data.statusCode).send({
-        error: {
-          code: client.data.statusCode === 429 ? "rate_limited" : "invalid_request",
-          message:
-            client.data.statusCode === 429 ? "Too many requests. Wait a moment and try again." : "The request was rejected.",
-        },
-      });
+      return reply.code(client.data.statusCode).send({ error: { code: "invalid_request", message: "The request was rejected." } });
     log("internal_error", {
       route: request.routeOptions.url ?? null,
       error: error instanceof Error ? `${error.name}: ${error.message}` : "non-error thrown",
@@ -119,10 +154,16 @@ export async function buildApp(options: AppOptions) {
       .send({ error: { code: "internal_error", message: "Leerr could not complete this operation." } });
   });
 
+  let warnedForwardedFor = false;
   app.addHook("onRequest", async (request, reply) => {
     // The matched route pattern, never the raw URL: encoded paths must not dodge checks.
     const route = request.routeOptions.url ?? "";
     if (route === "/health") return;
+    // Without X-Forwarded-For every client shares the proxy's address, and so its rate limits.
+    if (options.trustProxy?.length && request.headers["x-forwarded-for"] === undefined && !warnedForwardedFor) {
+      warnedForwardedFor = true;
+      log("proxy_missing_forwarded_for", {});
+    }
     if (route.startsWith("/api/")) reply.header("Cache-Control", "no-store");
     // The reverse proxy must preserve Host; X-Forwarded-Host is not trusted.
     if (request.headers.host !== origin.host)
@@ -146,7 +187,14 @@ export async function buildApp(options: AppOptions) {
     return payload;
   });
 
-  app.get("/health", async () => ({ status: "ok" }));
+  app.get("/health", async (_request, reply) => {
+    try {
+      if (context.store.healthy()) return { status: "ok" };
+    } catch {
+      // Reported below; the health check never returns details.
+    }
+    return reply.code(503).send({ status: "unavailable" });
+  });
   sessionRoutes(app, context);
   adminRoutes(app, context);
   connectionRoutes(app, context);
@@ -189,8 +237,13 @@ export async function buildApp(options: AppOptions) {
     );
   }
 
+  // preClose runs before the server waits for open connections; a playing
+  // stream would otherwise hold shutdown open until the process is killed.
+  app.addHook("preClose", async () => {
+    context.streams.close();
+    void context.reconciler.stop();
+  });
   app.addHook("onClose", async () => {
-    context.streams.abortAll();
     await context.reconciler.stop();
   });
   return { app, reconciler: context.reconciler, context };

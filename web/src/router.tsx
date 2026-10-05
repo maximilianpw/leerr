@@ -1,10 +1,20 @@
 import { useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
+import * as z from "zod/mini";
 
 const listeners = new Set<() => void>();
 const notify = () => {
   for (const listener of listeners) listener();
 };
 window.addEventListener("popstate", notify);
+
+// Each history entry records how deep into Leerr it is, so Back knows whether
+// an in-app page is behind it. Kept in history.state, so it survives reloads.
+const entry = z.object({ depth: z.number() });
+const depth = () => {
+  const parsed = entry.safeParse(history.state);
+  return parsed.success ? parsed.data.depth : 0;
+};
+if (!entry.safeParse(history.state).success) history.replaceState({ depth: 0 }, "");
 
 function subscribe(listener: () => void) {
   listeners.add(listener);
@@ -21,10 +31,16 @@ export function useLocation() {
 
 export function navigate(to: string, replace = false) {
   if (to === snapshot()) return;
-  if (replace) history.replaceState(null, "", to);
-  else history.pushState(null, "", to);
+  if (replace) history.replaceState({ depth: depth() }, "", to);
+  else history.pushState({ depth: depth() + 1 }, "", to);
   window.scrollTo(0, 0);
   notify();
+}
+
+/** Back within Leerr, or to `fallback` when this page was opened directly. */
+export function goBack(fallback: string) {
+  if (depth() > 0) history.back();
+  else navigate(fallback, true);
 }
 
 /** Matches `/albums/:id`-style patterns, returning decoded parameters. */
@@ -34,7 +50,13 @@ export function match(pattern: string, path: string): Map<string, string> | null
   if (expected.length !== actual.length) return null;
   const parameters = new Map<string, string>();
   for (const [index, part] of expected.entries()) {
-    if (part.startsWith(":")) parameters.set(part.slice(1), decodeURIComponent(actual[index]));
+    if (part.startsWith(":"))
+      try {
+        parameters.set(part.slice(1), decodeURIComponent(actual[index]));
+      } catch {
+        // A malformed escape matches nothing rather than crashing the view.
+        return null;
+      }
     else if (part !== actual[index]) return null;
   }
   return parameters;

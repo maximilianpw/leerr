@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Leerr API
-  version: "0.2"
+  version: "0.3"
   description: |
     Same-origin JSON API for the Leerr web app.
 
@@ -11,7 +11,16 @@ info:
     and need no CSRF token. Each session kind only works through its own channel.
 
     Every error has the body `{"error": {"code": "...", "message": "..."}}`;
-    messages are written for end users.
+    messages are written for end users. A 401 always means the Leerr session
+    ended; problems with a connected service use other statuses (for example
+    409 `jellyfin_reconnect` when Jellyfin no longer accepts the saved sign-in).
+
+    Rate limits: signed-in requests share a budget of 300 per minute per person,
+    except artwork (3000 per minute) and streams (6000 per minute). Password
+    changes and Jellyfin sign-ins are also limited per person (10 per 15
+    minutes each, on top of their wrong-password locks). Requests without a
+    session are limited per client address: sign-in 10 and setup 5 per 15
+    minutes. A 429 message and its `Retry-After` header give the real wait.
 servers:
   - url: /
 security:
@@ -28,10 +37,19 @@ tags:
 paths:
   /health:
     get:
-      summary: Liveness probe (no authentication, no data)
+      summary: Liveness probe (no authentication, no data); 503 when the database does not answer
       security: []
       responses:
-        "200": { $ref: "#/components/responses/Empty" }
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema: { type: object, required: [status], properties: { status: { const: ok } } }
+        "503":
+          description: The database does not answer
+          content:
+            application/json:
+              schema: { type: object, required: [status], properties: { status: { const: unavailable } } }
 
   /api/v1/setup:
     get:
@@ -68,12 +86,20 @@ paths:
         "200": { $ref: "#/components/responses/Empty" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
 
   /api/v1/sessions:
     post:
       tags: [Sessions]
       summary: Sign in
-      description: Rate limited per address, and locked per account after repeated failures.
+      description: |
+        Rate limited per address (10 per 15 minutes). Ten failures for an account
+        lock it for 15 minutes, except from a known device: a browser (or native
+        client) that signed in to that account before has its own failure budget,
+        so other people's guesses cannot lock its owner out. Browsers receive the
+        known-device token as an HttpOnly cookie, one per account, so everyone
+        who shares a browser keeps their own; native clients receive
+        `deviceToken` and send it back in later sign-ins.
       security: []
       requestBody:
         required: true
@@ -87,6 +113,7 @@ paths:
                 password: { type: string }
                 device: { type: string, enum: [web, native], default: web }
                 name: { type: string, maxLength: 80, default: Browser }
+                deviceToken: { type: string, description: Native clients only. }
       responses:
         "200":
           description: Signed in. Web sessions also set the session cookie.
@@ -99,6 +126,7 @@ paths:
                   user: { $ref: "#/components/schemas/User" }
                   csrf: { type: [string, "null"] }
                   token: { type: string, description: Native sessions only. }
+                  deviceToken: { type: [string, "null"], description: Native sessions only. }
         "401": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
     get:
@@ -154,6 +182,26 @@ paths:
                   csrf: { type: [string, "null"] }
         "401": { $ref: "#/components/responses/Error" }
 
+  /api/v1/me/password:
+    put:
+      tags: [Sessions]
+      summary: Change your own password
+      description: Every other session of the account ends; this one stays signed in. Five wrong current passwords lock this for 15 minutes; it is also limited to 10 per 15 minutes per person.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current, password]
+              properties:
+                current: { type: string }
+                password: { $ref: "#/components/schemas/Password" }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
   /api/v1/admin/users:
     get:
       tags: [Administration]
@@ -204,7 +252,12 @@ paths:
     patch:
       tags: [Administration]
       summary: Disable/enable, set a password or change role
-      description: Disabling or setting a password ends the user's sessions. At least one active administrator must remain.
+      description: |
+        Disabling or setting a password ends the user's sessions; an
+        administrator setting their own password stays signed in on this
+        device, as with `PUT /api/v1/me/password`. Setting a password or
+        re-enabling also lifts the account's sign-in lock. At least one active
+        administrator must remain.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -226,7 +279,7 @@ paths:
   /api/v1/admin/settings:
     get:
       tags: [Administration]
-      summary: Installation settings (the Lidarr API key is never returned)
+      summary: Installation settings (API keys and tokens are never returned)
       responses:
         "200":
           description: Settings
@@ -234,14 +287,32 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [jellyfinURL, lidarrURL, lidarrConfigured, rootFolderPath, qualityProfileID, metadataProfileID]
+                required:
+                  - jellyfinURL
+                  - lidarrURL
+                  - lidarrConfigured
+                  - lidarrReady
+                  - rootFolderPath
+                  - qualityProfileID
+                  - metadataProfileID
+                  - lastfmConfigured
+                  - notifyTarget
+                  - notifyFormat
+                  - notifyTokenSet
                 properties:
                   jellyfinURL: { type: [string, "null"] }
                   lidarrURL: { type: [string, "null"] }
-                  lidarrConfigured: { type: boolean }
+                  lidarrConfigured: { type: boolean, description: An address and API key are saved. }
+                  lidarrReady: { type: boolean, description: A root folder and both profiles are chosen too, so albums can be added. }
                   rootFolderPath: { type: [string, "null"] }
                   qualityProfileID: { type: [integer, "null"] }
                   metadataProfileID: { type: [integer, "null"] }
+                  lastfmConfigured: { type: boolean, description: An installation-wide Last.fm API key is saved. }
+                  notifyTarget:
+                    type: [string, "null"]
+                    description: The notification address's host only; for Discord and ntfy the full address is a credential.
+                  notifyFormat: { $ref: "#/components/schemas/NotifyFormat" }
+                  notifyTokenSet: { type: boolean }
 
   /api/v1/admin/settings/jellyfin:
     put:
@@ -263,8 +334,12 @@ paths:
       summary: Set the Lidarr connection and acquisition profile
       description: |
         The connection is verified before saving. A blank `apiKey` keeps the saved key
-        only when the URL is unchanged. Switching installations restarts every
-        unfinished request there, and is refused while a Lidarr change is unconfirmed.
+        only when the URL is unchanged. On the same host, omitted profile fields keep
+        their saved values, and completing the profile starts requests that were
+        waiting for it. A root folder or profile that this Lidarr does not offer
+        is refused (400 `lidarr_option_unknown`). Switching installations
+        restarts every unfinished request there, and is refused while a Lidarr
+        change is unconfirmed.
       requestBody:
         required: true
         content:
@@ -283,6 +358,103 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/settings/lastfm:
+    put:
+      tags: [Administration]
+      summary: Set (or clear, with an empty key) an installation-wide Last.fm API key
+      description: |
+        With it, members connect Last.fm with only a username, everyone gets Last.fm
+        cover art in search, and people without a Last.fm profile get suggestions
+        seeded from the album artists in their own Jellyfin library.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [apiKey], properties: { apiKey: { type: string } } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "502": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/settings/notifications:
+    put:
+      tags: [Administration]
+      summary: Where to announce requests that arrive, fail or need attention
+      description: |
+        An HTTPS ntfy topic, Discord webhook or generic JSON webhook. Messages
+        name the album, its artist and who asked for it; never ids or tokens.
+        A blank (or omitted) `url` keeps the saved address and `null` turns
+        notifications off. A blank `token` keeps the saved one only for a kept address.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [format]
+              properties:
+                url: { type: [string, "null"] }
+                format: { $ref: "#/components/schemas/NotifyFormat" }
+                token: { type: string, description: Optional bearer token, e.g. for a private ntfy server. Never sent to Discord. }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/notifications/test:
+    post:
+      tags: [Administration]
+      summary: Send a test notification to the saved target
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/status:
+    get:
+      tags: [Administration]
+      summary: Health of Jellyfin, Lidarr, the acquisition worker and backups
+      description: Service probes are cached for about 10 seconds.
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jellyfin, lidarr, lidarrReady, worker, acquisitions, streams, startedAt, lastBackup]
+                properties:
+                  jellyfin: { $ref: "#/components/schemas/Probe" }
+                  lidarr: { $ref: "#/components/schemas/Probe" }
+                  lidarrReady: { type: boolean }
+                  worker:
+                    type: object
+                    required: [lastPassAt, lastError, lastErrorAt, pendingChanges]
+                    properties:
+                      lastPassAt: { type: [string, "null"], format: date-time }
+                      lastError: { type: [string, "null"] }
+                      lastErrorAt: { type: [string, "null"], format: date-time }
+                      pendingChanges: { type: integer, description: Lidarr changes not yet confirmed. }
+                  acquisitions:
+                    type: object
+                    required: [requested, acquiring, imported, failed, attention]
+                    properties:
+                      requested: { type: integer }
+                      acquiring: { type: integer }
+                      imported: { type: integer }
+                      failed: { type: integer }
+                      attention: { type: integer }
+                  streams: { type: integer, description: Audio streams open right now. }
+                  startedAt: { type: string, format: date-time }
+                  lastBackup:
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        required: [at, ok]
+                        properties:
+                          at: { type: string, format: date-time }
+                          ok: { type: boolean }
+        "403": { $ref: "#/components/responses/Error" }
 
   /api/v1/admin/lidarr/options:
     get:
@@ -305,7 +477,7 @@ paths:
   /api/v1/admin/acquisitions:
     get:
       tags: [Administration]
-      summary: Every album Leerr is acquiring or has acquired (newest 500)
+      summary: Every album Leerr is acquiring or has acquired (newest change first, 500 at most)
       responses:
         "200":
           description: Acquisitions
@@ -330,13 +502,13 @@ paths:
                         reason: { type: [string, "null"] }
                         phase: { type: string, enum: [ready, pending_add, pending_monitor, pending_search, searching, finished] }
                         requesters: { type: integer }
-                        retryable: { type: boolean }
-                        updatedAt: { type: string, format: date-time }
+                        retryable: { type: boolean, description: Failed and attention rows can be retried; imported rows can be re-checked. }
+                        updatedAt: { type: string, format: date-time, description: When the status or reason last changed. }
 
   /api/v1/admin/acquisitions/{id}/retry:
     post:
       tags: [Administration]
-      summary: Retry a failed acquisition or one needing attention
+      summary: Retry a failed acquisition or one needing attention, or re-check an imported one
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -358,6 +530,7 @@ paths:
     get:
       tags: [Connections]
       summary: The current user's service connections
+      description: Checks the saved Jellyfin sign-in with Jellyfin, so this can take a moment.
       responses:
         "200":
           description: Connections
@@ -365,17 +538,23 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [jellyfinConfigured, jellyfin, lastfm, lidarrConfigured]
+                required: [jellyfinConfigured, jellyfin, jellyfinValid, lastfm, lastfmKeyProvided, lidarrConfigured, lidarrReady]
                 properties:
                   jellyfinConfigured: { type: boolean, description: An administrator has set the Jellyfin URL. }
                   jellyfin: { type: [string, "null"], description: Connected Jellyfin username. }
+                  jellyfinValid:
+                    type: [boolean, "null"]
+                    description: Whether Jellyfin still accepts the saved sign-in; null when not connected or Jellyfin could not be asked.
                   lastfm: { type: [string, "null"], description: Connected Last.fm username. }
+                  lastfmKeyProvided: { type: boolean, description: The installation has a Last.fm API key, so a username is enough. }
                   lidarrConfigured: { type: boolean }
+                  lidarrReady: { type: boolean }
 
   /api/v1/connections/jellyfin:
     put:
       tags: [Connections]
       summary: Sign in to Jellyfin; only the resulting token is stored (encrypted)
+      description: Leerr signs in as a device of its own per Leerr user. Five wrong passwords lock this for 15 minutes; it is also limited to 10 per 15 minutes per person.
       requestBody:
         required: true
         content:
@@ -389,24 +568,26 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Empty" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
 
   /api/v1/connections/lastfm:
     put:
       tags: [Connections]
-      summary: Connect a Last.fm username and API key (read-only, public data)
+      summary: Connect a Last.fm username, with your own API key or the installation's (read-only, public data)
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, apiKey]
+              required: [username]
               properties:
                 username: { type: string }
-                apiKey: { type: string }
+                apiKey: { type: string, description: Optional when the installation has a Last.fm key. }
       responses:
         "200": { $ref: "#/components/responses/Empty" }
+        "400": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
 
   /api/v1/connections/{service}:
@@ -426,6 +607,9 @@ paths:
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 60 } }
         - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+        - { name: sort, in: query, schema: { type: string, enum: [title, artist, year, added], default: title } }
+        - { name: artist, in: query, description: A Jellyfin album-artist id, schema: { type: string } }
+        - { name: favorites, in: query, schema: { type: string, enum: ["0", "1"], default: "0" } }
       responses:
         "200":
           description: Albums
@@ -438,6 +622,34 @@ paths:
                   items: { type: array, items: { $ref: "#/components/schemas/Album" } }
                   total: { type: integer }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/library/artists:
+    get:
+      tags: [Library]
+      summary: Album artists visible to the user's Jellyfin account, by name
+      parameters:
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200":
+          description: Artists
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, hasArtwork]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        hasArtwork: { type: boolean }
+                  total: { type: integer }
 
   /api/v1/albums/{id}:
     get:
@@ -456,18 +668,112 @@ paths:
                 properties:
                   album: { $ref: "#/components/schemas/Album" }
                   tracks: { type: array, items: { $ref: "#/components/schemas/Track" } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/playlists:
+    get:
+      tags: [Library]
+      summary: The user's Jellyfin music playlists
+      responses:
+        "200":
+          description: Playlists
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Playlist" } }
+
+  /api/v1/playlists/{id}:
+    get:
+      tags: [Library]
+      summary: A playlist and its tracks
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Playlist
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playlist, tracks]
+                properties:
+                  playlist: { $ref: "#/components/schemas/Playlist" }
+                  tracks: { type: array, items: { $ref: "#/components/schemas/Track" } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/playlists/{id}/tracks:
+    post:
+      tags: [Library]
+      summary: Add tracks to the end of a playlist
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trackIDs]
+              properties:
+                trackIDs: { type: array, minItems: 1, maxItems: 500, items: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/favorites/{id}:
+    put:
+      tags: [Library]
+      summary: Mark an album or track as a favourite in Jellyfin
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Library]
+      summary: Remove an album or track from the favourites in Jellyfin
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/playback:
+    post:
+      tags: [Library]
+      summary: Report playback to Jellyfin (play counts, "recently played", scrobbler plugins)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trackID, event, position]
+              properties:
+                trackID: { type: string }
+                event: { type: string, enum: [start, progress, stop] }
+                position: { type: number, minimum: 0, description: Seconds into the track. }
+                paused: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/artwork/{id}:
     get:
       tags: [Library]
-      summary: Album artwork through the user's Jellyfin access
+      summary: Artwork of an album, artist or playlist through the user's Jellyfin access
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: size, in: query, description: "small: 192 px, medium: 512 px, large: 1024 px", schema: { type: string, enum: [small, medium, large], default: medium } }
       responses:
         "200":
           description: Image
           content:
             image/*: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/v1/stream-tickets:
     post:
@@ -542,21 +848,44 @@ paths:
   /api/v1/discover/artists/{id}/albums:
     get:
       tags: [Discovery]
-      summary: An artist's albums from MusicBrainz, 25 per page
+      summary: An artist's releases from MusicBrainz, by type, oldest first within each page of 100
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 10000 } }
+        - { name: type, in: query, schema: { type: string, enum: [studio, ep, live, compilation, all], default: studio } }
       responses:
         "200":
           description: Albums
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CandidatePage" }
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/CandidatePage"
+                  - type: object
+                    required: [pageSize]
+                    properties:
+                      pageSize: { type: integer }
+
+  /api/v1/discover/new-releases:
+    get:
+      tags: [Discovery]
+      summary: Studio albums from the last 120 days by artists in the user's library, newest first
+      description: Needs MusicBrainz artist ids in the library's tags. Cached per user for 6 hours.
+      responses:
+        "200":
+          description: New releases
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Candidate" } }
 
   /api/v1/discover/release-groups/{id}/editions:
     get:
       tags: [Discovery]
-      summary: Editions (MusicBrainz releases) of an album, oldest first
+      summary: Editions (MusicBrainz releases) of an album, oldest first; up to 300
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -566,16 +895,19 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, total]
                 properties:
+                  total: { type: integer, description: How many editions MusicBrainz lists; more than items when capped. }
                   items:
                     type: array
                     items:
                       type: object
-                      required: [id, title, date, country, formats, tracks]
+                      required: [id, title, status, disambiguation, date, country, formats, tracks]
                       properties:
                         id: { type: string, format: uuid }
                         title: { type: string }
+                        status: { type: [string, "null"], description: e.g. Official, Bootleg, Promotion. }
+                        disambiguation: { type: string }
                         date: { type: [string, "null"] }
                         country: { type: [string, "null"] }
                         formats: { type: string }
@@ -585,7 +917,11 @@ paths:
     get:
       tags: [Discovery]
       summary: Suggested albums not already owned or requested
-      description: Withheld (409/5xx) when the user's Jellyfin library cannot be read to filter owned albums.
+      description: |
+        `source` says where they come from: the user's Last.fm profile, the album
+        artists in their Jellyfin library (with the installation's Last.fm key),
+        or recent albums on MusicBrainz. Withheld (409/5xx) when the user's
+        Jellyfin library cannot be read to filter owned albums.
       parameters:
         - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
       responses:
@@ -598,7 +934,7 @@ paths:
                 required: [items, source, emptyReason]
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/Candidate" } }
-                  source: { type: string, enum: [lastfm, musicbrainz] }
+                  source: { type: string, enum: [lastfm, library, musicbrainz] }
                   emptyReason: { type: [string, "null"], enum: [no_candidates, all_excluded, null] }
 
   /api/v1/requests:
@@ -607,8 +943,10 @@ paths:
       summary: Request an album edition
       description: |
         MusicBrainz must confirm the group, edition and artist belong together.
-        If someone is already acquiring another edition of the album, the request
-        joins it (`sharedEdition: true`).
+        If someone else is already acquiring another edition of the album, the
+        request joins it (`sharedEdition: true`). Asking again for an album you
+        requested is acknowledged (`alreadyRequested: true`); for an album Leerr
+        considers imported, it re-checks Lidarr.
       requestBody:
         required: true
         content:
@@ -627,10 +965,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [id, edition, sharedEdition]
+                required: [id, edition, alreadyRequested, sharedEdition]
                 properties:
                   id: { type: string, format: uuid }
                   edition: { type: string, format: uuid }
+                  alreadyRequested: { type: boolean }
                   sharedEdition: { type: boolean }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
@@ -644,16 +983,25 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items, libraryChecked]
+                required: [items, libraryChecked, library]
                 properties:
                   libraryChecked:
                     type: boolean
                     description: False when Jellyfin could not be read, so availability is unknown.
+                  library:
+                    description: Album counts in the user's library; albums without a MusicBrainz release-group id cannot be matched to requests.
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        required: [albums, unmatched]
+                        properties:
+                          albums: { type: integer }
+                          unmatched: { type: integer }
                   items:
                     type: array
                     items:
                       type: object
-                      required: [id, releaseGroupMBID, releaseMBID, title, artist, status, reason, retryable, albumID, requestedAt, updatedAt]
+                      required: [id, releaseGroupMBID, releaseMBID, title, artist, status, unseen, reason, retryable, albumID, requestedAt, updatedAt]
                       properties:
                         id: { type: string, format: uuid }
                         releaseGroupMBID: { type: string, format: uuid }
@@ -664,11 +1012,60 @@ paths:
                           oneOf:
                             - $ref: "#/components/schemas/AcquisitionStatus"
                             - { type: string, const: available, description: In this user's Jellyfin library. }
+                        unseen:
+                          type: boolean
+                          description: An outcome (available, failed, attention) this person has not marked seen yet; drives the Requests badge.
                         reason: { type: [string, "null"] }
                         retryable: { type: boolean }
                         albumID: { type: [string, "null"] }
                         requestedAt: { type: string, format: date-time }
-                        updatedAt: { type: string, format: date-time }
+                        updatedAt: { type: string, format: date-time, description: When the status or reason last changed. }
+
+  /api/v1/requests/seen:
+    post:
+      tags: [Requests]
+      summary: Mark outcomes as seen
+      description: |
+        The Requests page sends the outcomes it showed, so `unseen` turns false
+        for them. A later different outcome is unseen again. Kept per person on
+        the server: nothing about requests is stored in the browser. Unknown or
+        other people's ids are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [id, status]
+                    properties:
+                      id: { type: string, format: uuid }
+                      status: { type: string, enum: [requested, acquiring, imported, available, failed, attention] }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/requests/{id}:
+    delete:
+      tags: [Requests]
+      summary: Withdraw one of your requests
+      description: |
+        Others who asked for the same album keep their requests. When nobody is
+        left, Leerr stops tracking the album; Lidarr is not changed, so an album it
+        already monitors may still download. Refused (409) while a Lidarr change
+        for the album is unconfirmed.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/requests/{id}/retry:
     post:
@@ -690,7 +1087,7 @@ components:
       description: Success
       content:
         application/json:
-          schema: { type: object }
+          schema: { type: object, maxProperties: 0 }
     Error:
       description: Error
       content:
@@ -709,6 +1106,7 @@ components:
     Username: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-zA-Z0-9_.-]+$" }
     Password: { type: string, minLength: 10, maxLength: 256 }
     Role: { type: string, enum: [admin, member] }
+    NotifyFormat: { type: string, enum: [ntfy, discord, json] }
     User:
       type: object
       required: [id, username, role]
@@ -722,47 +1120,75 @@ components:
       properties:
         id: { type: integer }
         name: { type: string }
+    Probe:
+      type: object
+      required: [state, message, version, latencyMs]
+      properties:
+        state: { type: string, enum: [ok, error, unconfigured] }
+        message: { type: string }
+        version: { type: [string, "null"] }
+        latencyMs: { type: [integer, "null"] }
     AcquisitionStatus:
       type: string
       enum: [requested, acquiring, imported, failed, attention]
       description: |
         requested: queued for Lidarr. acquiring: Lidarr is searching or downloading.
         imported: Lidarr has every track. failed: retryable. attention: a Lidarr
-        change could not be confirmed, or Leerr hit an error; retryable.
+        change could not be confirmed, a download is stuck, or Leerr hit an error; retryable.
     Album:
       type: object
-      required: [id, title, artist, year, releaseGroupMBID, releaseMBID]
+      required: [id, title, artist, artistID, artistMBID, year, releaseGroupMBID, releaseMBID, hasArtwork, favorite]
       properties:
         id: { type: string }
         title: { type: string }
-        artist: { type: string }
+        artist: { type: string, description: The album artist. }
+        artistID: { type: [string, "null"], description: Jellyfin album-artist id, for filtering the library. }
+        artistMBID: { type: [string, "null"], description: MusicBrainz album-artist id, for the artist's discography. }
         year: { type: [integer, "null"] }
         releaseGroupMBID: { type: [string, "null"] }
         releaseMBID: { type: [string, "null"] }
+        hasArtwork: { type: boolean }
+        favorite: { type: boolean }
     Track:
       type: object
-      required: [id, title, artist, disc, number, duration, codec, sampleRate, bitDepth]
+      required: [id, title, artist, albumID, albumTitle, disc, number, duration, codec, sampleRate, bitDepth, favorite]
       properties:
         id: { type: string }
         title: { type: string }
         artist: { type: string }
+        albumID: { type: [string, "null"] }
+        albumTitle: { type: [string, "null"] }
         disc: { type: [integer, "null"] }
         number: { type: [integer, "null"] }
         duration: { type: [number, "null"], description: Seconds. }
         codec: { type: [string, "null"] }
         sampleRate: { type: [number, "null"] }
         bitDepth: { type: [integer, "null"] }
+        favorite: { type: boolean }
+    Playlist:
+      type: object
+      required: [id, name, tracks, duration, hasArtwork]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        tracks: { type: [integer, "null"] }
+        duration: { type: [number, "null"], description: Seconds. }
+        hasArtwork: { type: boolean }
     Candidate:
       type: object
-      required: [id, title, artist, artistMBID, year, coverUrl, status]
+      required: [id, title, artist, artistMBID, year, date, primaryType, secondaryTypes, coverUrl, status, albumID]
       properties:
         id: { type: string, format: uuid, description: MusicBrainz release group. }
         title: { type: string }
-        artist: { type: string }
+        artist: { type: string, description: As credited, e.g. "A vs. B". }
         artistMBID: { type: string, format: uuid }
         year: { type: [string, "null"] }
+        date: { type: [string, "null"] }
+        primaryType: { type: [string, "null"], description: e.g. Album, EP. }
+        secondaryTypes: { type: array, items: { type: string }, description: e.g. Live, Compilation. }
         coverUrl: { type: [string, "null"] }
         status: { type: [string, "null"], enum: [available, requested, null] }
+        albumID: { type: [string, "null"], description: The Jellyfin album when it is in the caller's library. }
     CandidatePage:
       type: object
       required: [items, total]

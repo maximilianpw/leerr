@@ -1,27 +1,36 @@
-import { ArrowLeft, Clock3, Pause, Play } from "lucide-react";
+import { ArrowLeft, ListEnd, ListPlus, ListStart, Pause, Play, Shuffle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { albumDetailSchema, artworkURL, request, type Track } from "../api.ts";
 import { useResource } from "../hooks.ts";
-import { usePlayer, type QueueItem } from "../player.tsx";
-import { Artwork, ErrorBox, formatDuration, Spinner } from "../ui.tsx";
-
-function quality(track: Track): string {
-  return [
-    track.codec?.toUpperCase() ?? "",
-    track.bitDepth ? `${track.bitDepth}-bit` : "",
-    track.sampleRate ? `${track.sampleRate / 1000} kHz` : "",
-  ]
-    .filter((part) => part)
-    .join(" · ");
-}
+import { useEnqueue, usePlayer } from "../player.tsx";
+import { goBack, Link } from "../router.tsx";
+import { AddToPlaylist, FavoriteButton, TrackList } from "../tracks.tsx";
+import { Artwork, ErrorBox, formatDuration, Spinner, Title } from "../ui.tsx";
 
 export function AlbumPage({ id }: { id: string }) {
   const detail = useResource((signal) => request(`/albums/${encodeURIComponent(id)}`, albumDetailSchema, { signal }), [id]);
   const player = usePlayer();
+  const enqueue = useEnqueue();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [adding, setAdding] = useState<Track[] | null>(null);
+  const settled = detail.data !== null || !detail.loading;
+  // The heading that had focus during loading is replaced: move focus to the new one,
+  // unless the person has already moved on.
+  useEffect(() => {
+    if (settled && document.activeElement === document.body) heading.current?.focus();
+  }, [settled]);
 
+  const back = (
+    <button type="button" className="back" onClick={() => goBack("/library")}>
+      <ArrowLeft aria-hidden="true" /> Back
+    </button>
+  );
   if (detail.loading && !detail.data)
     return (
       <div className="page">
-        <h1 className="sr-only" tabIndex={-1}>
+        <Title text="Loading album" />
+        {back}
+        <h1 className="sr-only" tabIndex={-1} ref={heading}>
           Loading album
         </h1>
         <Spinner label="Loading album…" />
@@ -30,88 +39,96 @@ export function AlbumPage({ id }: { id: string }) {
   if (!detail.data)
     return (
       <div className="page">
-        <button type="button" className="back" onClick={() => history.back()}>
-          <ArrowLeft aria-hidden="true" /> Back
-        </button>
-        <h1 tabIndex={-1}>Album unavailable</h1>
+        <Title text="Album unavailable" />
+        {back}
+        <h1 tabIndex={-1} ref={heading}>
+          Album unavailable
+        </h1>
         <ErrorBox message={detail.error || "This album could not be loaded."} retry={detail.reload} />
+        {detail.code === "jellyfin_reconnect" && <Link to="/settings">Reconnect Jellyfin in Settings</Link>}
       </div>
     );
 
-  const { album, tracks } = detail.data;
-  const queue: QueueItem[] = tracks.map((track) => ({ ...track, albumID: album.id, albumTitle: album.title }));
+  const { album } = detail.data;
+  // The queue needs to know where each track comes from (artwork, the link back here).
+  const tracks = detail.data.tracks.map((track) => ({ ...track, albumID: album.id, albumTitle: album.title }));
   const playingHere = player.current?.albumID === album.id;
   const total = tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0);
-  const discs = new Set(tracks.map((track) => track.disc ?? 1)).size;
+  const play = (shuffle: boolean) => {
+    if (shuffle) {
+      player.controller.playShuffled(tracks);
+      return;
+    }
+    player.controller.setShuffle(false);
+    player.controller.playQueue(tracks, 0);
+  };
 
   return (
     <div className="page">
-      <button type="button" className="back" onClick={() => history.back()}>
-        <ArrowLeft aria-hidden="true" /> Back
-      </button>
+      <Title text={`${album.title} – ${album.artist}`} />
+      {back}
       <section className="albumHero">
-        <Artwork sources={[artworkURL(album.id)]} />
+        <Artwork sources={album.hasArtwork ? [artworkURL(album.id, "large")] : []} />
         <div>
           <span className="eyebrow">Album</span>
-          <h1 tabIndex={-1}>{album.title}</h1>
-          <p className="albumArtist">{album.artist}</p>
+          <h1 tabIndex={-1} ref={heading}>
+            {album.title}
+          </h1>
+          <p className="albumArtist">
+            {album.artistMBID ? (
+              <Link to={`/discover/artists/${album.artistMBID}?name=${encodeURIComponent(album.artist)}`} label={`More by ${album.artist} on Discover`}>
+                {album.artist}
+              </Link>
+            ) : (
+              album.artist
+            )}
+          </p>
           <p className="muted">
             {[album.year, `${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}`, total ? formatDuration(total) : ""]
               .filter((part) => part)
               .join(" · ")}
+            {album.artistID && (
+              <>
+                {" · "}
+                <Link to={`/library?artist=${encodeURIComponent(album.artistID)}&name=${encodeURIComponent(album.artist)}`}>
+                  All {album.artist} in your library
+                </Link>
+              </>
+            )}
           </p>
-          <button
-            type="button"
-            className="primary"
-            disabled={!tracks.length}
-            onClick={() => (playingHere ? player.toggle() : player.playQueue(queue, 0))}
-          >
-            {playingHere && player.playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
-            {playingHere && player.playing ? "Pause" : playingHere ? "Resume" : "Play album"}
-          </button>
+          <div className="heroActions">
+            <button
+              type="button"
+              className="primary"
+              disabled={!tracks.length}
+              onClick={() => (playingHere ? player.controller.toggle() : play(false))}
+            >
+              {playingHere && player.playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
+              {playingHere && player.playing ? "Pause" : playingHere && !player.loading ? "Resume" : "Play album"}
+            </button>
+            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => play(true)}>
+              <Shuffle aria-hidden="true" /> Shuffle
+            </button>
+            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => enqueue(tracks, "next")}>
+              <ListStart aria-hidden="true" /> Play next
+            </button>
+            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => enqueue(tracks, "end")}>
+              <ListEnd aria-hidden="true" /> Add to queue
+            </button>
+            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => setAdding(tracks)}>
+              <ListPlus aria-hidden="true" /> Add to playlist
+            </button>
+            <FavoriteButton itemID={album.id} name={album.title} initial={album.favorite} />
+          </div>
+          {album.artistMBID && (
+            <p className="small">
+              <Link to={`/discover/artists/${album.artistMBID}?name=${encodeURIComponent(album.artist)}`}>More by {album.artist}</Link> — albums you could request.
+            </p>
+          )}
         </div>
       </section>
-      <ol className="tracks" aria-label="Tracks">
-        <li className="track heading" aria-hidden="true">
-          <span>#</span>
-          <span>Title</span>
-          <span>Source</span>
-          <span>
-            <Clock3 />
-          </span>
-        </li>
-        {tracks.map((track, index) => {
-          const active = playingHere && player.index === index;
-          return (
-            <li key={track.id} className={`track ${active ? "active" : ""}`}>
-              <button
-                type="button"
-                className="trackPlay"
-                onClick={() => (active ? player.toggle() : player.playQueue(queue, index))}
-                aria-label={active && player.playing ? `Pause ${track.title}` : `Play ${track.title}`}
-                aria-current={active ? "true" : undefined}
-              >
-                <span className="trackNumber">
-                  {active && player.playing ? (
-                    <Pause aria-hidden="true" />
-                  ) : (
-                    <>
-                      <span className="number">{discs > 1 && track.disc ? `${track.disc}.` : ""}{track.number ?? index + 1}</span>
-                      <Play aria-hidden="true" className="hoverPlay" />
-                    </>
-                  )}
-                </span>
-                <span className="trackTitle">
-                  <b>{track.title}</b>
-                  {track.artist && track.artist !== album.artist && <small>{track.artist}</small>}
-                </span>
-                <span className="trackQuality">{quality(track)}</span>
-                <span className="trackDuration">{formatDuration(track.duration)}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ol>
+      <TrackList tracks={tracks} showArtistUnless={album.artist} />
+      {adding && <AddToPlaylist tracks={adding} close={() => setAdding(null)} />}
     </div>
   );
 }

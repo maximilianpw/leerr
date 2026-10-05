@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import { buildApp } from "./http/app.ts";
 import { logEvent } from "./log.ts";
 import { hashPassword } from "./passwords.ts";
-import { FakeUpstreams, identities, makeStore } from "./testing.ts";
-import { UpstreamError, type Album, type AlbumDetail, type Artwork, type JellyfinAccess } from "./upstream/index.ts";
+import { configuredSettings, FakeUpstreams, fixtureAlbum, identities, makeStore } from "./testing.ts";
+import { UpstreamError, type Album, type AlbumDetail, type Artwork, type ArtworkSize, type JellyfinAccess } from "./upstream/index.ts";
 
 const covers = ["evening", "coastal", "rooms"].map((name) =>
   readFileSync(new URL(`./fixtures/cover-${name}.png`, import.meta.url)),
@@ -28,22 +28,27 @@ class PreviewUpstreams extends FakeUpstreams {
   constructor() {
     super();
     const albums: Album[] = [
-      {
+      fixtureAlbum({
         id: "available",
         title: identities.album.title,
         artist: identities.album.artist,
+        artistID: "artist-quiet",
+        artistMBID: identities.album.artistMBID,
         year: 2024,
         releaseGroupMBID: identities.album.releaseGroupMBID,
         releaseMBID: identities.album.releaseMBID,
-      },
-      ...titles.map((title, index) => ({
-        id: `preview-${index}`,
-        title,
-        artist: ["Coastal Lines", "Mira Sol", "Northbound"][index % 3],
-        year: 2015 + index,
-        releaseGroupMBID: null,
-        releaseMBID: null,
-      })),
+      }),
+      ...titles.map((title, index) =>
+        fixtureAlbum({
+          id: `preview-${index}`,
+          title,
+          artist: ["Coastal Lines", "Mira Sol", "Northbound"][index % 3],
+          artistID: `artist-${index % 3}`,
+          year: 2015 + index,
+          // One deliberately missing cover keeps the placeholder visible.
+          hasArtwork: index !== 7,
+        }),
+      ),
     ];
     this.libraries.set("admin-jelly-token", albums);
   }
@@ -58,13 +63,14 @@ class PreviewUpstreams extends FakeUpstreams {
         title,
         number: index + 1,
         artist: detail.album.artist,
+        albumID,
+        albumTitle: detail.album.title,
       })),
     };
   }
-  override async jellyfinArtwork(access: JellyfinAccess, itemID: string): Promise<Artwork> {
-    await super.jellyfinAlbum(access, itemID);
-    // One deliberately missing cover keeps the placeholder visible.
-    if (itemID === "preview-7") throw new UpstreamError("upstream_rejected", 404, "No artwork.", "not_applied");
+  override async jellyfinArtwork(access: JellyfinAccess, itemID: string, _size: ArtworkSize): Promise<Artwork> {
+    const { album } = await super.jellyfinAlbum(access, itemID);
+    if (!album.hasArtwork) throw new UpstreamError("upstream_rejected", 404, "No artwork.", "not_applied");
     const index = itemID === "available" ? 0 : (Number(itemID.slice(8)) + 1) % covers.length;
     return { type: "image/png", bytes: covers[index] };
   }
@@ -76,12 +82,10 @@ const now = Date.now();
 if (!process.env.LEERR_PREVIEW_SETUP) {
   const admin = store.createUser("preview", await hashPassword("preview-password"), "admin", now);
   store.saveSettings({
+    ...configuredSettings,
     jellyfinURL: "https://jellyfin.fixture.invalid",
     lidarrURL: "https://lidarr.fixture.invalid",
     lidarrKey: "fixture-key",
-    rootFolderPath: "/music",
-    qualityProfileID: 1,
-    metadataProfileID: 1,
   });
   store.putSecret(admin.id, "jellyfin", JSON.stringify({ token: "admin-jelly-token", userID: "jf-admin", username: "preview" }));
   const imported = store.request(admin.id, identities.album, now - 86_400_000);

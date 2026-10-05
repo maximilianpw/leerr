@@ -1,14 +1,16 @@
+# Settings come from .env next to this file (copy .env.example), so every
+# docker compose command (up, stop, exec, run) sees the same values.
 services:
   leerr:
     build: .
     restart: unless-stopped
-    # Lets an in-flight Lidarr call finish before the container is killed.
+    # Leerr exits on its own within 50 s; this lets an in-flight Lidarr call finish first.
     stop_grace_period: 60s
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      LEERR_ORIGIN: ${LEERR_ORIGIN:?Set the public HTTPS origin}
-      LEERR_TRUST_PROXY: ${LEERR_TRUST_PROXY:?Set the reverse proxy IP/CIDR}
+      LEERR_ORIGIN: ${LEERR_ORIGIN:?Set LEERR_ORIGIN in .env (the public HTTPS origin)}
+      LEERR_TRUST_PROXY: ${LEERR_TRUST_PROXY:?Set LEERR_TRUST_PROXY in .env (the reverse proxy's address)}
       LEERR_KEY_FILE: /run/secrets/leerr_key
     volumes:
       - leerr_data:/data
@@ -19,8 +21,17 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+# A fixed subnet, so a proxy on the host always reaches Leerr from the same
+# gateway address (LEERR_TRUST_PROXY). Change both if it overlaps another network.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.213.47.0/24
+          gateway: 10.213.47.1
 secrets:
   leerr_key:
-    file: ${LEERR_KEY_FILE:?Set the separately protected encryption key file}
+    # Bind-mounted with the host file's owner: UID 1000 (the image's user) must be able to read it.
+    file: ${LEERR_KEY_FILE:?Set LEERR_KEY_FILE in .env (the key file on this host)}
 volumes:
   leerr_data:

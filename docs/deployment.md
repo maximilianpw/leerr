@@ -4,10 +4,11 @@
 
 - One host that runs Docker, or Node 24 (see [nix.md](nix.md) for the Nix package).
 - An HTTPS reverse proxy in front of Leerr. Leerr refuses plain HTTP.
-- Jellyfin reachable from Leerr over HTTPS. Lidarr, also over HTTPS, is needed
-  for requests.
+- Jellyfin 10.9 or newer (tested with 12.1), reachable from Leerr over HTTPS.
+  Lidarr 2 or newer (tested with 3.1), also over HTTPS, is needed for requests. Their certificates must be ones Node trusts: public, or from a
+  CA you add (see [Private CA](#private-ca-or-self-signed-upstreams)).
 - A 32-byte encryption key in its own file, stored and backed up separately from
-  the data.
+  the data, and outside any Git checkout.
 
 ## Configuration
 
@@ -17,28 +18,58 @@
 | `LEERR_KEY_FILE` | yes | Path to a file containing a base64-encoded 32-byte key |
 | `LEERR_TRUST_PROXY` | behind a proxy | Comma-separated IPs/CIDRs of your reverse proxy **only**. Forwarded protocol and client address are trusted only from these. |
 | `LEERR_DATA` | no | Data directory (default `./data`; `/data` in the image) |
+| `LEERR_BACKUP_DIR` | no | Turns on scheduled backups into this directory |
+| `LEERR_BACKUP_HOURS`, `LEERR_BACKUP_KEEP` | no | How often (default every 24 hours) and how many to keep (default 7) |
+| `NODE_EXTRA_CA_CERTS` | no | A PEM file with extra CAs to trust for Jellyfin and Lidarr |
 | `HOST`, `PORT` | no | Listen address (default `0.0.0.0:3000`) |
 
-Create the key once and never replace it for an existing database:
+Create the key once, outside any checkout, and never replace it for an existing
+database. In Docker the key is read as UID 1000 (the image's user):
 
 ```sh
-node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))' > leerr-key
-chmod 600 leerr-key
+sudo install -d -m 700 /etc/leerr
+node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))' | sudo tee /etc/leerr/key >/dev/null
+sudo chown 1000:1000 /etc/leerr/key && sudo chmod 600 /etc/leerr/key
 ```
+
+With rootless Docker or Podman, the engine runs as you and cannot read a
+root-only `/etc/leerr`. Keep the key in a directory you own instead, and give
+it to UID 1000 inside your user namespace:
+
+```sh
+install -d -m 700 ~/.config/leerr
+node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))' > ~/.config/leerr/key
+chmod 600 ~/.config/leerr/key
+podman unshare chown 1000:1000 ~/.config/leerr/key
+# rootless Docker: nsenter -U --preserve-credentials -t "$(cat "$XDG_RUNTIME_DIR/docker.pid")" chown 1000:1000 ~/.config/leerr/key
+```
+
+Then set `LEERR_KEY_FILE` in `.env` to that file's absolute path (Compose does
+not expand `~`); the `/etc/leerr/key` default in `.env.example` is for rootful
+Docker. For a non-Docker install, make the key readable only by the user Leerr
+runs as.
 
 ## Docker
 
 ```sh
-LEERR_ORIGIN=https://music.example.com \
-LEERR_TRUST_PROXY=172.18.0.1/32 \
-LEERR_KEY_FILE="$PWD/leerr-key" docker compose up -d --build
+cp .env.example .env    # set LEERR_ORIGIN; check LEERR_TRUST_PROXY and LEERR_KEY_FILE
+docker compose up -d --build
 ```
 
-`compose.yaml` publishes the port on loopback only and mounts the key as a
-read-only secret. It keeps data in the `leerr_data` volume and checks `/health`.
+The variables live in `.env` (ignored by Git), so every later `docker compose`
+command sees them. `compose.yaml` publishes the port on loopback only and mounts
+the key as a read-only secret. It keeps data in the `leerr_data` volume, checks
+`/health` (which also checks the database), and pins the container network to
+`10.213.47.0/24`, so a proxy on the host always connects from `10.213.47.1`, the
+`LEERR_TRUST_PROXY` in `.env.example`. If that subnet clashes with another
+network, change it in `compose.yaml` and in `.env` together.
+
 The container runs as UID 1000. Everything Leerr writes is private to that user
-(directory 0700, files 0600). Stop it with `docker compose stop`: Leerr finishes
-its current Lidarr call before exiting (up to 60 s).
+(directory 0700, files 0600). Stop it with `docker compose stop`: Leerr ends open
+streams, finishes the Lidarr call in flight and exits within 50 seconds.
+
+Optional additions (scheduled backups, a private CA) go in a
+`compose.override.yaml`; copy `compose.override.example.yaml` and keep what you need.
 
 Without Docker: `npm ci && npm run build`, then run `node server/main.ts` as a
 dedicated unprivileged user with the variables above. Native modules (argon2,
@@ -47,16 +78,21 @@ fits.
 
 ## Reverse proxy
 
-- Terminate TLS and forward to Leerr. Preserve the original `Host` header and
-  send `X-Forwarded-Proto: https`.
+- Terminate TLS and forward to Leerr. Preserve the original `Host` header
+  (it must equal `LEERR_ORIGIN`'s host and port exactly), send
+  `X-Forwarded-Proto: https`, and send the client's address in
+  `X-Forwarded-For`. Without it every client shares the proxy's address, and so
+  its sign-in and request limits; Leerr logs `proxy_missing_forwarded_for` once
+  when that happens.
 - Set `LEERR_TRUST_PROXY` to the address the proxy connects from. Never trust a
-  whole client network.
+  whole client network. If every page answers "Leerr requires HTTPS"
+  (`https_required`) behind a working HTTPS proxy, this address is wrong.
 - Don't buffer responses and allow long-lived requests: audio streams pass
   straight through with Range support.
 - **Keep `/api/v1/streams/…` paths out of access logs.** The path is a playback
   credential valid for up to six hours.
 
-Caddy example:
+Caddy (sets the forwarded headers itself):
 
 ```caddy
 music.example.com {
@@ -71,6 +107,33 @@ music.example.com {
 }
 ```
 
+nginx:
+
+```nginx
+map $request_uri $leerr_log_uri {
+  ~^/api/v1/streams/ /api/v1/streams/[redacted];
+  default $request_uri;
+}
+log_format leerr '$remote_addr [$time_local] "$request_method $leerr_log_uri" $status';
+
+server {
+  listen 443 ssl;
+  server_name music.example.com;
+  access_log /var/log/nginx/leerr.log leerr;
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+    # $http_host keeps a non-default port (e.g. :8443); $host would drop it.
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+  }
+}
+```
+
+HAProxy: `option forwardfor` and `http-request set-header X-Forwarded-Proto https`.
+
 ## First run
 
 1. Open the site. It asks for a **setup token**: read it from `setup-token` in
@@ -78,54 +141,169 @@ music.example.com {
    token is deleted once the first administrator exists.
 2. **Settings → Server:** enter the Jellyfin address. Then enter the Lidarr
    address and API key, save, choose a root folder and the quality and metadata
-   profiles, and save again.
-3. **Settings → Connections:** each person connects their own Jellyfin account.
-   Last.fm (username + API key) is optional and enables personal suggestions.
-4. **Settings → Users:** add people. Share their temporary password privately.
+   profiles, and save again. Requests made before the profiles are chosen wait,
+   and start as soon as you save them.
+3. Optionally, still under **Server**: a Last.fm API key for everyone (members
+   then connect Last.fm with just a username, and people without Last.fm get
+   suggestions from their own library), and a notification address.
+4. **Settings → Connections:** each person connects their own Jellyfin account.
+5. **Settings → Users:** add people. Share their temporary password privately;
+   they can change it under **Settings → Account**.
+
+Leerr recognises albums in Jellyfin by their **MusicBrainz release-group id**.
+Turn on tag writing in Lidarr (Settings → Metadata) or let Jellyfin's
+MusicBrainz plugin fill it in; albums without it never show as arrived, and the
+Requests page says how many there are. Requesting EPs, live albums or
+compilations only works if Lidarr's metadata profile allows those types.
+
+## Notifications
+
+Under **Settings → Server → Notifications**, set an HTTPS address and its kind:
+
+- **ntfy**: a topic URL such as `https://ntfy.sh/your-topic`, with an optional
+  access token for a private server;
+- **Discord**: a channel webhook URL;
+- **JSON webhook**: Leerr POSTs `{source, event, title, message, album, requesters}`.
+
+Leerr announces each request that arrives in Lidarr, fails, or needs an
+administrator, once per change. Messages name the album, its artist and who
+asked for it; they never contain ids, tokens or links. **Send a test** checks the
+address. Failures are logged (`notification_failed`) and never hold up requests.
+
+## Private CA or self-signed upstreams
+
+Set `NODE_EXTRA_CA_CERTS` to a PEM file holding your root CA, or the self-signed
+certificate itself (one file can hold several). Node reads it only at startup.
+
+- Docker: in `compose.override.yaml`, set `NODE_EXTRA_CA_CERTS: /etc/leerr/ca.pem`
+  and mount the file read-only (it must be readable by UID 1000).
+- systemd: add `Environment=NODE_EXTRA_CA_CERTS=/etc/leerr/ca.pem`.
+
+Saving the Jellyfin address does not contact Jellyfin. A certificate that
+still does not verify shows up as "Lidarr could not be reached
+(UNABLE_TO_GET_ISSUER_CERT_LOCALLY): its certificate is not trusted…" (or a
+similar code) when saving Lidarr, when someone connects Jellyfin under
+**Settings → Connections**, and on **Settings → Status**.
 
 ## Day to day
 
 - **Requests needing attention.** "Needs attention" means Leerr sent a change to
-  Lidarr but couldn't confirm it (for example, Lidarr timed out). Look at the
-  album in Lidarr, then use **Retry** or **Remove** under **Settings → All
-  requests**. Leerr never automatically repeats a change whose outcome is
-  unknown.
-- **Failed requests** (search failed, or nothing found within a day) can be
+  Lidarr but couldn't confirm it (for example, Lidarr timed out or was down), or
+  a download Lidarr grabbed is stuck. Look at the album in Lidarr (its Activity
+  queue for downloads), then use **Retry** or **Remove** under **Settings → All
+  requests**. Leerr never automatically repeats a change whose outcome is unknown.
+- **Failed requests** (search failed, or nothing grabbed within a day) can be
   retried by the person who requested them or by an administrator.
+- **Settings → Status** shows whether Jellyfin and Lidarr answer, the worker's
+  last pass and problem, request counts, open streams and the last backup.
 - **Logs** are JSON lines on stdout, for example `login_failed`,
-  `user_updated`, `acquisition_upstream_error` and `internal_error`. They contain
-  no secrets.
+  `user_updated`, `upstream_error`, `acquisition_upstream_error`,
+  `notification_failed`, `backup_failed`, `startup_failed` and
+  `internal_error`. They contain no secrets.
+
+## Backups
+
+Set `LEERR_BACKUP_DIR` (in Docker, through `compose.override.yaml` with a host
+directory writable by UID 1000) and Leerr writes a consistent copy of the live
+database every `LEERR_BACKUP_HOURS` (first one a minute after starting) as
+`leerr-<time>.sqlite`, keeping the newest `LEERR_BACKUP_KEEP`. Copy that
+directory off the machine. The key is **not** included: back it up separately
+and label each database with its key.
+
+The running server holds the database, so ad-hoc backups with the operator
+command need Leerr stopped (below).
 
 ## Offline maintenance
 
-Stop Leerr first; these commands don't coordinate with a running server. Use the
-same `LEERR_DATA` and `LEERR_KEY_FILE` as the server.
+Stop Leerr first: these commands refuse to run while it holds the database. Use
+the same `LEERR_DATA` and `LEERR_KEY_FILE` as the server. They never change a
+database's schema version (the server upgrades it when it starts).
 
 ```sh
-# Docker
-docker compose run --rm leerr node server/operator.ts backup /data/backup-2026-09-30.sqlite
-# Nix / source
+# Nix
 leerr-operator reset-password alice < new-password-file
 leerr-operator backup /protected/leerr-2026-09-30.sqlite
+leerr-operator restore /protected/leerr-2026-09-30.sqlite
 leerr-operator rotate-key /protected/new-key
+```
+
+From a source checkout, run them in the checkout as the user Leerr runs as,
+with absolute paths (`LEERR_DATA` defaults to `./data`):
+
+```sh
+node server/operator.ts reset-password alice < new-password-file
+node server/operator.ts backup /protected/leerr-2026-09-30.sqlite
+node server/operator.ts restore /protected/leerr-2026-09-30.sqlite
+node server/operator.ts rotate-key /protected/new-key
 ```
 
 - `reset-password USER` reads the password from stdin, re-enables the account
   and signs out all of its devices.
-- `backup DEST` writes a consistent copy of the database. The key is **not**
-  included: back it up separately and label each database with its key.
+- `backup DEST` writes a consistent copy of the database. The key is **not** included.
+- `restore BACKUP` checks the backup against the current key, moves the current
+  database (and its write-ahead log, which must never be replayed onto another
+  database) aside as `leerr.sqlite.before-restore-<time>`, and puts the backup in
+  place. Set `LEERR_KEY_FILE` to the key that belongs to the backup first. The
+  backup is copied, never opened where it lies, so it can be on read-only media.
 - `rotate-key NEW_KEY_FILE` re-encrypts all stored credentials under the new key
   and signs everyone out. Afterwards, point `LEERR_KEY_FILE` at the new key. Old
   backups still need the old key.
 
-To **restore**, stop Leerr, put back the database together with its matching key,
-start Leerr where only you can reach it, check that you can sign in, then open
-access again.
+With Docker (the variables come from `.env`; `backups/` must be writable by UID 1000
+for `backup`):
 
-## Upgrading from the pre-refresh Leerr
+```sh
+docker compose stop
+mkdir -p backups && sudo chown 1000 backups
+printf '%s\n' 'a new password' | docker compose run --rm -T leerr node server/operator.ts reset-password alice
+docker compose run --rm -v "$PWD/backups:/backups" leerr node server/operator.ts backup /backups/leerr-$(date +%F).sqlite
+docker compose run --rm -v "$PWD/backups:/backups:ro" leerr node server/operator.ts restore /backups/leerr-2026-09-30.sqlite
+docker compose run --rm -v /etc/leerr/new-key:/run/new-key:ro leerr node server/operator.ts rotate-key /run/new-key
+docker compose up -d --force-recreate
+```
 
-This release uses a new database schema (version 3) and does not migrate the
-old one (versions 1–2). It refuses to start on an old database rather than touch
-it. Move the old data directory aside, keeping it as a backup, and start with an
-empty one: set up the administrator again, and have each person reconnect
+The key reaches the container as a Compose secret, fixed when the container is
+created. Whenever `LEERR_KEY_FILE` changes (after `rotate-key`, or to restore a
+backup made with another key), edit `.env` first; every later `docker compose
+run` and the restart then use the new key. Restart with `docker compose up -d
+--force-recreate`: `docker compose start`, and even a plain `up -d`, keep the
+old key mounted, and Leerr then stops with "The encryption key does not match
+this database".
+
+## Upgrading
+
+Leerr upgrades its database schema by itself on start and keeps a copy of the
+database it started from next to it (`leerr.sqlite.v<old version>-<id>.bak`).
+Release notes are in [CHANGELOG.md](../CHANGELOG.md); read them before
+upgrading.
+
+Upgrading to 0.3 asks everyone to reconnect Jellyfin once: Leerr now signs in as
+a separate Jellyfin device per person. Docker deployments also need
+`LEERR_TRUST_PROXY=10.213.47.1` and a `.env` that points at the existing key
+(see the changelog).
+
+### Rolling back
+
+Rolling the program back does not roll the database back: an older release
+refuses a newer schema. Put the pre-upgrade copy back first. Anything written
+since the upgrade is lost.
+
+1. Stop Leerr.
+2. Restore the copy with the **newer** release's operator, which 0.2 does not
+   have: `leerr-operator restore /var/lib/leerr/leerr.sqlite.v3-<id>.bak` (on
+   Nix, the operator from the new generation's store path, since after a
+   rollback only the old one is on `PATH`; in Docker, the new image). Restore
+   keeps the copy's schema version.
+3. Switch the program back and start it with the same key.
+
+By hand instead: with Leerr stopped, move `leerr.sqlite` and any
+`leerr.sqlite-wal` and `leerr.sqlite-shm` aside together, copy the `.bak` to
+`leerr.sqlite` (owned by the service user, mode 0600), then start the older
+release.
+
+### From the pre-refresh Leerr
+
+Schema versions 1–2 are not migrated. Leerr refuses to start on them rather than
+touch them. Move the old data directory aside, keeping it as a backup, and start
+with an empty one: set up the administrator again, and have each person reconnect
 Jellyfin. The encryption key can be reused or replaced.

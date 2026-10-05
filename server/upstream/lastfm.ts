@@ -84,6 +84,15 @@ export class Lastfm {
     );
   }
 
+  /** Proves an API key works without needing a username (installation-wide keys). */
+  async checkKey(apiKey: string): Promise<void> {
+    parseBody(
+      z.object({ artists: z.object({}).loose() }).loose(),
+      await this.#call("chart.getTopArtists", apiKey, { limit: "1" }),
+      SERVICE,
+    );
+  }
+
   async searchAlbums(apiKey: string, album: string): Promise<LastfmAlbum[]> {
     const result = parseBody(
       z.object({

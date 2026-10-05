@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { endpointURL, UpstreamError } from "./errors.ts";
-import { HttpClient, parseBody, type JsonValue } from "./http.ts";
+import { HttpClient, parseBody, statusError, type JsonValue } from "./http.ts";
 
 export type LidarrAccess = { endpoint: string; key: string };
 export type LidarrProfile = {
@@ -41,13 +41,23 @@ const candidate = z
   .loose();
 const albumResource = candidate.omit({ artist: true });
 export type LidarrCandidate = z.infer<typeof candidate>;
+export type LidarrRelease = { id: string; monitored: boolean };
 export type LidarrAlbum = {
   id: number;
+  artistID: number | null;
   monitored: boolean;
-  /** Every track has a file. Any edition counts: the album is in the library. */
+  /** Lidarr imports any edition, not just the monitored one. */
+  anyReleaseOk: boolean;
+  /** Every track of the monitored edition has a file. Any edition counts: the album is in the library. */
   imported: boolean;
+  releases: LidarrRelease[];
   resource: z.infer<typeof albumResource>;
 };
+/**
+ * A download Lidarr is handling for an album: progressing, stalled in the
+ * download client (often brief), or a problem Lidarr itself reports.
+ */
+export type LidarrDownload = { state: "active" | "stalled" | "problem"; detail: string };
 export type CommandStatus =
   | "queued"
   | "started"
@@ -68,16 +78,41 @@ const commandStatuses: readonly CommandStatus[] = [
   "cancelled",
   "orphaned",
 ];
-const commandList = z.array(
-  z
-    .object({
-      id: z.number().int().positive(),
-      name: z.string(),
-      status: z.string(),
-      body: z.object({ albumIds: z.array(z.number().int()).optional() }).loose().optional(),
-    })
-    .loose(),
-);
+const command = z
+  .object({
+    id: z.number().int().positive(),
+    name: z.string(),
+    status: z.string(),
+    body: z
+      .object({
+        albumIds: z.array(z.number().int()).optional(),
+        albumId: z.number().int().optional(),
+        artistId: z.number().int().optional(),
+        artistIds: z.array(z.number().int()).optional(),
+      })
+      .loose()
+      .optional(),
+  })
+  .loose();
+const commandList = z.array(command);
+const commandStatus = (value: string): CommandStatus => commandStatuses.find((status) => status === value) ?? "unknown";
+const refreshCommands = new Set(["RefreshArtist", "RefreshAlbum", "BulkRefreshArtist"]);
+const queueItem = z
+  .object({
+    status: z.string().optional(),
+    trackedDownloadStatus: z.string().optional(),
+    trackedDownloadState: z.string().optional(),
+    statusMessages: z
+      .array(z.object({ title: z.string().optional(), messages: z.array(z.string()).optional() }).loose())
+      .optional(),
+    errorMessage: z.string().nullable().optional(),
+  })
+  .loose();
+// Lidarr's TrackedDownloadState and TrackedDownloadStatus values that need a person.
+const problemStates = new Set(["importBlocked", "importFailed", "downloadFailed", "downloadFailedPending"]);
+const problemStatuses = new Set(["warning", "error"]);
+// Download-client states; a stalled torrent reports "warning" while it waits for peers.
+const stalledStatuses = new Set(["warning", "error", "failed"]);
 
 export class Lidarr {
   readonly #http: HttpClient;
@@ -132,6 +167,11 @@ export class Lidarr {
     };
   }
 
+  /** Lidarr's version, proving the address and key work. */
+  async version(access: LidarrAccess): Promise<string> {
+    return parseBody(z.object({ version: z.string() }).loose(), await this.#get(access, "system/status"), SERVICE).version;
+  }
+
   async album(access: LidarrAccess, releaseGroupMBID: string): Promise<LidarrAlbum | null> {
     const group = mbid.parse(releaseGroupMBID);
     const url = endpointURL(access.endpoint, "api/v1/album");
@@ -140,12 +180,15 @@ export class Lidarr {
       z
         .object({
           id: z.number().int().positive(),
+          artistId: z.number().int().positive().optional(),
           foreignAlbumId: z.string(),
           monitored: z.boolean().optional(),
+          anyReleaseOk: z.boolean().optional(),
           releases: z.array(release).default([]),
           statistics: z
             .object({
               trackCount: z.number().int().nonnegative().optional(),
+              totalTrackCount: z.number().int().nonnegative().optional(),
               trackFileCount: z.number().int().nonnegative().optional(),
             })
             .loose()
@@ -160,17 +203,29 @@ export class Lidarr {
     if (matches.length > 1)
       throw new UpstreamError("upstream_protocol", 502, "Lidarr lists this album more than once.");
     const value = matches[0];
-    const tracks = value.statistics?.trackCount ?? 0;
+    // trackCount only counts wanted tracks: for an unmonitored or undated album it
+    // equals the file count as soon as one file exists. totalTrackCount does not.
+    const tracks = Math.max(value.statistics?.totalTrackCount ?? 0, value.statistics?.trackCount ?? 0);
     const files = value.statistics?.trackFileCount ?? 0;
     return {
       id: value.id,
+      artistID: value.artistId ?? null,
       monitored: value.monitored === true,
+      anyReleaseOk: value.anyReleaseOk === true,
       imported: tracks > 0 && files >= tracks,
+      releases: value.releases.map((entry) => ({
+        id: entry.foreignReleaseId.toLowerCase(),
+        monitored: entry.monitored === true,
+      })),
       resource: albumResource.parse(value),
     };
   }
 
-  /** Builds the add payload: only this album and exactly one edition are monitored. */
+  /**
+   * Builds the add payload. Lidarr discards the posted edition flags and
+   * monitors its own pick once it has loaded the album, so the worker pins the
+   * requested edition afterwards; until then any edition may import.
+   */
   async lookup(access: LidarrAccess, identity: Identity, profile: LidarrProfile): Promise<LidarrCandidate> {
     const group = mbid.parse(identity.releaseGroupMBID);
     const artist = mbid.parse(identity.artistMBID);
@@ -215,13 +270,14 @@ export class Lidarr {
           metadataProfileId: profile.metadataProfileID,
           monitored: false,
           monitorNewItems: "none",
-          addOptions: { monitor: "none", albumsToMonitor: [], searchForMissingAlbums: false },
+          // Lidarr applies these after its first scan: an empty list would unmonitor this album too.
+          addOptions: { monitor: "none", albumsToMonitor: [group], searchForMissingAlbums: false },
         };
     return {
       ...found,
       artist: artistPayload,
       monitored: true,
-      anyReleaseOk: false,
+      anyReleaseOk: true,
       releases: found.releases.map((value) => ({
         ...value,
         monitored: value.foreignReleaseId.toLowerCase() === edition,
@@ -258,25 +314,79 @@ export class Lidarr {
   /** Highest command id Lidarr currently remembers; searches issued later exceed it. */
   async latestCommandID(access: LidarrAccess): Promise<number> {
     const commands = parseBody(commandList, await this.#get(access, "command"), SERVICE);
-    return commands.reduce((highest, command) => Math.max(highest, command.id), 0);
+    return commands.reduce((highest, entry) => Math.max(highest, entry.id), 0);
   }
 
   /** Newest AlbumSearch for this album with an id above `after`. */
   async latestSearch(access: LidarrAccess, albumID: number, after: number): Promise<LidarrCommand | null> {
     let latest: LidarrCommand | null = null;
-    for (const command of parseBody(commandList, await this.#get(access, "command"), SERVICE)) {
+    for (const entry of parseBody(commandList, await this.#get(access, "command"), SERVICE)) {
       if (
-        command.id > after &&
-        command.name === "AlbumSearch" &&
-        command.body?.albumIds?.includes(albumID) &&
-        (!latest || command.id > latest.id)
+        entry.id > after &&
+        entry.name === "AlbumSearch" &&
+        entry.body?.albumIds?.includes(albumID) &&
+        (!latest || entry.id > latest.id)
       )
-        latest = {
-          id: command.id,
-          status: commandStatuses.find((status) => status === command.status) ?? "unknown",
-        };
+        latest = { id: entry.id, status: commandStatus(entry.status) };
     }
     return latest;
+  }
+
+  /**
+   * One command by id. Unlike the command list, which Lidarr empties on
+   * restart, this reads Lidarr's database. Null once Lidarr has forgotten it.
+   */
+  async command(access: LidarrAccess, id: number): Promise<LidarrCommand | null> {
+    const response = await this.#http.jsonResponse(
+      endpointURL(access.endpoint, `api/v1/command/${id}`),
+      { headers: { Accept: "application/json", "X-Api-Key": access.key } },
+      { service: SERVICE },
+    );
+    if (response.status === 404) return null;
+    if (response.status < 200 || response.status > 299) throw statusError(response.status, SERVICE);
+    const value = parseBody(command, response.body, SERVICE);
+    if (value.id !== id) throw new UpstreamError("upstream_protocol", 502, "Lidarr returned a different command.");
+    return { id: value.id, status: commandStatus(value.status) };
+  }
+
+  /** Whether Lidarr is still (re)loading this album or its artist, e.g. right after an add. */
+  async refreshing(access: LidarrAccess, album: LidarrAlbum): Promise<boolean> {
+    return parseBody(commandList, await this.#get(access, "command"), SERVICE).some((entry) => {
+      if (!refreshCommands.has(entry.name) || (entry.status !== "queued" && entry.status !== "started")) return false;
+      const body = entry.body ?? {};
+      // Current Lidarr sends artistIds (artistId is legacy); empty lists mean every artist.
+      const scoped =
+        body.albumId !== undefined ||
+        (body.albumIds?.length ?? 0) > 0 ||
+        body.artistId !== undefined ||
+        (body.artistIds?.length ?? 0) > 0;
+      // An unscoped refresh covers every artist.
+      if (!scoped) return true;
+      return (
+        body.albumId === album.id ||
+        body.albumIds?.includes(album.id) === true ||
+        (album.artistID !== null && (body.artistId === album.artistID || body.artistIds?.includes(album.artistID) === true))
+      );
+    });
+  }
+
+  /** Downloads Lidarr is tracking for this album. */
+  async downloads(access: LidarrAccess, albumID: number): Promise<LidarrDownload[]> {
+    const url = endpointURL(access.endpoint, "api/v1/queue/details");
+    url.searchParams.set("albumIds", String(albumID));
+    url.searchParams.set("includeAlbum", "false");
+    return parseBody(z.array(queueItem), await this.#get(access, "queue/details", url), SERVICE).map((item) => {
+      const state = item.trackedDownloadState ?? "";
+      const tracked = (item.trackedDownloadStatus ?? "").toLowerCase();
+      const client = (item.status ?? "").toLowerCase();
+      const problem = problemStates.has(state) || problemStatuses.has(tracked);
+      const stalled = !problem && stalledStatuses.has(client);
+      const message = item.errorMessage || item.statusMessages?.flatMap((entry) => entry.messages ?? [])[0] || "";
+      return {
+        state: problem ? "problem" : stalled ? "stalled" : "active",
+        detail: (message || state || client || "queued").slice(0, 200),
+      };
+    });
   }
 
   async search(access: LidarrAccess, albumID: number): Promise<number> {

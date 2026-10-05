@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import { buildApp, type AppOptions } from "../http/app.ts";
 import { hashPassword } from "../passwords.ts";
+import type { LogFields } from "../log.ts";
 import type { Role } from "../store.ts";
-import { Clock, FakeUpstreams, makeStore } from "../testing.ts";
+import { Clock, configuredSettings, FakeUpstreams, makeStore } from "../testing.ts";
 import type { JsonValue } from "../upstream/http.ts";
 
 export const ORIGIN = "https://leerr.test";
@@ -17,7 +18,7 @@ export async function harness(t: TestContext, options: Partial<AppOptions> = {})
   const store = options.store ?? makeStore();
   const upstream = new FakeUpstreams();
   const clock = new Clock();
-  const events: Array<{ event: string }> = [];
+  const events: Array<{ event: string; fields: LogFields }> = [];
   const built = await buildApp({
     store,
     origin: ORIGIN,
@@ -25,7 +26,7 @@ export async function harness(t: TestContext, options: Partial<AppOptions> = {})
     upstream,
     now: clock.now,
     secure: false,
-    log: (event) => events.push({ event }),
+    log: (event, fields = {}) => events.push({ event, fields }),
     ...options,
   });
   t.after(() => built.app.close());
@@ -73,15 +74,19 @@ export async function harness(t: TestContext, options: Partial<AppOptions> = {})
   }
 
   function configure() {
-    store.saveSettings({
-      jellyfinURL: "https://jellyfin.test",
-      lidarrURL: "https://lidarr.test",
-      lidarrKey: "lidarr-key",
-      rootFolderPath: "/music",
-      qualityProfileID: 1,
-      metadataProfileID: 1,
-    });
+    store.saveSettings(configuredSettings);
   }
 
-  return { ...built, store, upstream, clock, events, call, user, login, configure };
+  /** Runs worker passes, advancing the clock to each next due row, until nothing is due within `horizon`. */
+  async function work(horizon = 10 * 60_000, rounds = 10) {
+    await built.reconciler.settle();
+    for (let round = 0; round < rounds; round++) {
+      const next = Math.min(...store.acquisitions().map((row) => row.nextAt));
+      if (!Number.isFinite(next) || next > clock.now() + horizon) return;
+      clock.advance(Math.max(0, next - clock.now()));
+      await built.reconciler.run();
+    }
+  }
+
+  return { ...built, store, upstream, clock, events, call, user, login, configure, work };
 }

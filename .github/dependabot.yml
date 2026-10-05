@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Oxlint and its plugin API must move together (docs/development.md#lint).
+      oxlint:
+        patterns: ["oxlint", "@oxlint/*"]
+      minor-and-patch:
+        update-types: [minor, patch]
+    # The nix-deps check fails until npmDepsHash in nix/package.nix is updated too.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

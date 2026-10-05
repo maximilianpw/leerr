@@ -20,5 +20,15 @@
       inherit (pkgs) leerr;
       default = pkgs.leerr;
     };
+
+    # `nix flake check` also runs Oxlint with the anti-slop rules (needs memory headroom).
+    checks.x86_64-linux = {
+      inherit (self.packages.x86_64-linux) leerr;
+      lint = self.packages.x86_64-linux.leerr.overrideAttrs (_: {
+        pname = "leerr-lint";
+        checkPhase = "runHook preCheck; npm run lint; runHook postCheck";
+        installPhase = "touch $out";
+      });
+    };
   };
 }

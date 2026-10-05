@@ -25,13 +25,14 @@ in
         && lib.cleanSourceFilter path type;
     };
     nodejs = nodejs_24;
-    npmDepsHash = "sha256-rs3UcSNewd4pHwBHekOoFZdpudT+J1eYpU2qF+S9R9c=";
+    npmDepsHash = "sha256-HANTxCJLRNWCoFC8rwK5weEkcfZRkRW9mmPkNrvqEW4=";
     nativeBuildInputs = [makeWrapper];
 
+    # Tests only: Oxlint's plugin needs several GiB of memory, so lint runs in
+    # `nix flake check` (checks.lint) rather than in every package build.
     doCheck = true;
     checkPhase = ''
       runHook preCheck
-      npm run lint
       npm test
       runHook postCheck
     '';

@@ -16,31 +16,27 @@ export type CallOptions = {
 export type JsonResponse = { status: number; body: JsonValue };
 
 // Failures that prove the request never reached the service.
-const notSentCodes = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "CERT_HAS_EXPIRED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
-]);
+const notSentCodes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+// Certificate checks and TLS handshakes finish before any HTTP bytes are written.
+const certificateCode = /CERT|^INVALID_CA$|^HOSTNAME_MISMATCH$|^ERR_TLS_/;
+const handshakeCode = /^ERR_SSL_/;
 const causeCode = z.object({
   cause: z.object({ code: z.string() }).loose(),
 });
 
 function transportError(cause: unknown, service: string): UpstreamError {
   const parsed = causeCode.safeParse(cause);
-  const notSent = parsed.success && notSentCodes.has(parsed.data.cause.code);
+  const code = parsed.success ? parsed.data.cause.code : "";
+  const certificate = certificateCode.test(code);
+  const notSent = notSentCodes.has(code) || certificate || handshakeCode.test(code);
   return new UpstreamError(
     "upstream_unavailable",
     503,
-    notSent
-      ? `${service} could not be reached (${parsed.data.cause.code}).`
-      : `${service} did not respond in time or closed the connection.`,
+    certificate
+      ? `${service} could not be reached (${code}): its certificate is not trusted. See NODE_EXTRA_CA_CERTS in the deployment guide.`
+      : notSent
+        ? `${service} could not be reached (${code}).`
+        : `${service} did not respond in time or closed the connection.`,
     notSent ? "not_applied" : "unknown",
   );
 }
@@ -174,41 +170,29 @@ export class HttpClient {
     return response;
   }
 
-  /** JSON with a deadline covering the whole body, not just the headers. */
-  async json(
-    url: URL,
-    init: RequestInit,
-    options: CallOptions,
-  ): Promise<JsonValue> {
-    const result = await this.jsonResponse(url, init, options);
-    if (result.status < 200 || result.status > 299)
-      throw statusError(result.status, options.service);
-    return result.body;
-  }
-
-  /** Like json(), but returns non-2xx JSON bodies for services with error envelopes. */
-  async jsonResponse(
-    url: URL,
-    init: RequestInit,
-    options: CallOptions,
-  ): Promise<JsonResponse> {
+  /** Reads the whole response under one deadline that covers the body, not just the headers. */
+  async #read(url: URL, init: RequestInit, options: CallOptions): Promise<{ response: Response; bytes: Uint8Array }> {
     const deadline = AbortSignal.timeout(options.timeoutMs ?? 10_000);
-    const signal = options.signal
-      ? AbortSignal.any([deadline, options.signal])
-      : deadline;
-    let response: Response;
-    let bytes: Uint8Array;
+    const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
     try {
-      response = await this.open(url, init, { ...options, signal });
-      bytes = await readBounded(
-        response,
-        options.maxBytes ?? 2_000_000,
-        options.service,
-      );
+      const response = await this.open(url, init, { ...options, signal });
+      return { response, bytes: await readBounded(response, options.maxBytes ?? 2_000_000, options.service) };
     } catch (cause) {
       if (cause instanceof UpstreamError || !deadline.aborted) throw cause;
       throw transportError(cause, options.service);
     }
+  }
+
+  /** JSON with a deadline covering the whole body, not just the headers. */
+  async json(url: URL, init: RequestInit, options: CallOptions): Promise<JsonValue> {
+    const result = await this.jsonResponse(url, init, options);
+    if (result.status < 200 || result.status > 299) throw statusError(result.status, options.service);
+    return result.body;
+  }
+
+  /** Like json(), but returns non-2xx JSON bodies for services with error envelopes. */
+  async jsonResponse(url: URL, init: RequestInit, options: CallOptions): Promise<JsonResponse> {
+    const { response, bytes } = await this.#read(url, init, options);
     try {
       return {
         status: response.status,
@@ -222,6 +206,31 @@ export class HttpClient {
         `${options.service} did not return valid JSON. Check the server URL and reverse-proxy route.`,
       );
     }
+  }
+
+  /** A request whose response body is ignored, e.g. 204 No Content. Returns the status. */
+  async empty(url: URL, init: RequestInit, options: CallOptions): Promise<number> {
+    return (await this.#read(url, init, options)).response.status;
+  }
+
+  /** Binary content (e.g. images), size-capped and under one deadline. */
+  async binary(url: URL, init: RequestInit, options: CallOptions): Promise<{ status: number; type: string; bytes: Uint8Array }> {
+    const { response, bytes } = await this.#read(url, init, options);
+    const type = (response.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
+    return { status: response.status, type, bytes };
+  }
+}
+
+/** JSON from bytes already read; a body that is not JSON is a protocol error. */
+export function parseJson(bytes: Uint8Array, service: string): JsonValue {
+  try {
+    return jsonValue.parse(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch {
+    throw new UpstreamError(
+      "upstream_protocol",
+      502,
+      `${service} did not return valid JSON. Check the server URL and reverse-proxy route.`,
+    );
   }
 }
 

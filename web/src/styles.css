@@ -180,6 +180,7 @@ fieldset {
 }
 
 button:disabled,
+button[aria-disabled="true"],
 fieldset:disabled button {
   opacity: 0.5;
   cursor: not-allowed;
@@ -423,7 +424,8 @@ fieldset:disabled button {
 .field select {
   height: 42px;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  /* At least 3:1 against the page so the field's edge is visible. */
+  border: 1px solid #6b7280;
   border-radius: 8px;
   background: var(--bg);
   color: var(--text-strong);
@@ -432,7 +434,7 @@ fieldset:disabled button {
 
 .field input:hover,
 .field select:hover {
-  border-color: #6b7280;
+  border-color: var(--muted);
 }
 
 .field small {
@@ -806,7 +808,8 @@ fieldset:disabled button {
   left: 8px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: rgb(var(--accent-rgb) / 0.9);
+  /* Opaque, so light covers cannot wash the label out. */
+  background: var(--accent);
   color: #fff;
   font-size: 0.7rem;
   font-weight: 700;
@@ -815,7 +818,23 @@ fieldset:disabled button {
 }
 
 .artBadge.available {
-  background: rgb(22 163 74 / 0.9);
+  background: #15803d;
+}
+
+.artBadge.favorite {
+  right: 8px;
+  left: auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.artBadge.favorite svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .skeleton .artwork {
@@ -902,10 +921,14 @@ fieldset:disabled button {
   backdrop-filter: blur(6px);
 }
 
+/* Sticky, so a long list (the queue, editions) never scrolls the only way out away. */
 .modalClose {
-  position: absolute;
-  top: 12px;
-  right: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  float: right;
+  margin: -16px -16px 0 8px;
+  background: var(--surface);
 }
 
 .editionHead {
@@ -1063,6 +1086,12 @@ fieldset:disabled button {
   border-top: 1px solid var(--line);
 }
 
+.track:not(.heading) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
 .track.heading,
 .trackPlay {
   display: grid;
@@ -1071,10 +1100,24 @@ fieldset:disabled button {
   align-items: center;
 }
 
+/* The last heading column plus its gap matches .trackEnd, so headings line up with the rows. */
+.track.heading {
+  grid-template-columns: 44px minmax(0, 1fr) 200px 56px 72px;
+}
+
+.trackEnd {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  width: 84px;
+  padding-right: 4px;
+}
+
 .track.heading {
   min-height: 40px;
   padding: 0 8px;
-  color: #6b7280;
+  color: var(--muted);
   font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1246,23 +1289,24 @@ fieldset:disabled button {
   white-space: nowrap;
 }
 
+/* Opaque fills: white text stays above 4.5:1 whatever is behind the badge. */
 .status-available,
 .status-imported {
-  border-color: var(--good);
-  background: rgb(22 163 74 / 0.8);
-  color: #dcfce7;
+  border-color: #15803d;
+  background: #15803d;
+  color: #fff;
 }
 
 .status-failed {
-  border-color: var(--bad);
-  background: rgb(220 38 38 / 0.8);
-  color: #fee2e2;
+  border-color: #b91c1c;
+  background: #b91c1c;
+  color: #fff;
 }
 
 .status-attention {
-  border-color: var(--warn);
-  background: rgb(217 119 6 / 0.8);
-  color: #fffbeb;
+  border-color: #b45309;
+  background: #b45309;
+  color: #fff;
 }
 
 /* ---------- Settings ---------- */
@@ -1364,7 +1408,7 @@ fieldset:disabled button {
   color: var(--muted);
 }
 
-.rows > li > span:not(.avatar):not(.pill) {
+.rows > li > span:not(.avatar):not(.pill):not(.connected) {
   display: grid;
   flex: 1;
   min-width: 12rem;
@@ -1394,8 +1438,10 @@ fieldset:disabled button {
   z-index: 30;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.2fr) auto;
+  grid-template-rows: 1fr auto;
   align-items: center;
-  gap: 16px;
+  /* No row gap: an error line must fit inside the fixed-height bar. */
+  gap: 0 16px;
   height: var(--player);
   padding: 0 16px;
   border-top: 1px solid var(--line);
@@ -1468,7 +1514,79 @@ fieldset:disabled button {
 
 .playerSeek input {
   flex: 1;
+  min-height: 24px;
   accent-color: var(--accent-hot);
+}
+
+.playerEnd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.iconButton.toggle.on {
+  color: var(--accent-soft);
+  background: rgb(var(--accent-rgb) / 0.18);
+}
+
+.playerError {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--bad-soft);
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playerError:empty {
+  display: none;
+}
+
+.queueList {
+  display: grid;
+  gap: 4px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queueList li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+}
+
+.queueList li.active {
+  background: rgb(var(--accent-rgb) / 0.14);
+}
+
+.queueJump {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.queueJump b,
+.queueJump small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queueJump small {
+  color: var(--muted);
+}
+
+.queueActions {
+  display: flex;
+  gap: 2px;
 }
 
 /* ---------- Narrow screens ---------- */
@@ -1513,13 +1631,39 @@ fieldset:disabled button {
     color: var(--accent-soft);
   }
 
+  /* Three rows: now playing, controls, seek. Pages leave this much room above the player. */
+  :root {
+    --player: 164px;
+  }
+
   .player {
     bottom: calc(var(--bottom-nav) + env(safe-area-inset-bottom));
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto;
+    gap: 4px 10px;
+    height: auto;
+    min-height: var(--player);
+    padding: 8px 12px;
+  }
+
+  .playerNow {
+    grid-column: 1;
+  }
+
+  .playerEnd {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .playerControls {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: center;
   }
 
   .playerSeek {
-    display: none;
+    grid-column: 1 / -1;
+    grid-row: 3;
   }
 
   .page {
@@ -1550,7 +1694,6 @@ fieldset:disabled button {
     gap: 16px;
   }
 
-  .track.heading,
   .trackPlay {
     grid-template-columns: 32px minmax(0, 1fr) 48px;
   }
@@ -1580,8 +1723,31 @@ fieldset:disabled button {
     padding: 22px 16px;
   }
 
-  .playerControls .iconButton:first-child {
-    display: none;
+  .track.heading {
+    grid-template-columns: 32px minmax(0, 1fr) 48px 72px;
+  }
+
+  /* Cover and title side by side; the actions get the full width below. */
+  .albumHero > div:not(.artwork) {
+    display: contents;
+  }
+
+  .albumHero > div:not(.artwork) > * {
+    grid-column: 1 / -1;
+  }
+
+  .albumHero > div:not(.artwork) > .eyebrow,
+  .albumHero > div:not(.artwork) > h1,
+  .albumHero > div:not(.artwork) > .albumArtist {
+    grid-column: 2;
+  }
+
+  .albumHero > .artwork {
+    grid-row: 1 / span 3;
+  }
+
+  .heroActions .secondary {
+    padding-inline: 10px;
   }
 }
 
@@ -1591,5 +1757,340 @@ fieldset:disabled button {
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- Additions ---------- */
+
+.navLink {
+  position: relative;
+}
+
+.navBadge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.bottomNav .navBadge {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  margin: 0;
+}
+
+.shelf {
+  margin-bottom: 28px;
+}
+
+.shelfHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shelf .artGrid {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(150px, 180px);
+  grid-template-columns: none;
+  overflow-x: auto;
+  /* Room for the focus ring and hover lift, which the scroller would otherwise clip. */
+  padding: 4px 4px 12px;
+  margin: -4px -4px 0;
+}
+
+.libraryTools {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.inlineField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.inlineField select {
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid #6b7280;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-strong);
+}
+
+.selectedFilter,
+.favoriteButton.on {
+  border-color: var(--accent-hot);
+  color: var(--accent-soft);
+}
+
+.favoriteButton.on svg {
+  fill: currentColor;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.heroActions .primary {
+  margin: 0;
+}
+
+.artwork.round {
+  width: 40px;
+  border-radius: 50%;
+}
+
+.artistRow > .artwork {
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.artwork.placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.artwork.placeholder svg {
+  width: 40%;
+  height: 40%;
+}
+
+.trackMenu {
+  position: relative;
+}
+
+.trackMenu summary {
+  list-style: none;
+}
+
+.trackMenu summary::-webkit-details-marker {
+  display: none;
+}
+
+.trackMenu .menu {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 13rem;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  box-shadow: 0 12px 30px -8px #000;
+}
+
+.trackMenu .menu.up {
+  bottom: 100%;
+}
+
+.trackMenu .menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trackMenu .menu button:hover {
+  background: var(--line);
+}
+
+.trackMenu .menu svg {
+  width: 16px;
+  height: 16px;
+}
+
+.staleNotice {
+  margin: 0 0 16px;
+  color: var(--warn-soft);
+  font-size: 0.85rem;
+}
+
+.staleNotice.idle {
+  margin: 0;
+}
+
+.refreshing {
+  opacity: 0.85;
+}
+
+.dialogForm {
+  margin-top: 16px;
+}
+
+.editionStatus {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #b45309;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.connected.warning {
+  border-color: var(--warn);
+  background: rgb(217 119 6 / 0.18);
+  color: var(--warn-soft);
+}
+
+.rowActions.start {
+  margin-left: 0;
+}
+
+/* With viewport-fit=cover, content keeps clear of notches and rounded corners. */
+.page {
+  padding-left: max(2rem, env(safe-area-inset-left));
+  padding-right: max(2rem, env(safe-area-inset-right));
+}
+
+@media (max-width: 1000px) {
+  .page {
+    padding-left: max(1.25rem, env(safe-area-inset-left));
+    padding-right: max(1.25rem, env(safe-area-inset-right));
+  }
+
+  .player {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+}
+
+@media (max-width: 720px) {
+  .page {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+}
+
+/* What was queued, said briefly above the player (and to screen readers). */
+.toastRegion {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--toast-offset, 0px) + 16px);
+  z-index: 40;
+  max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: 0 12px 30px -8px #000;
+  color: var(--text-strong);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+html:has(.shell.withPlayer) {
+  --toast-offset: var(--player);
+}
+
+/* Keyboard focus is never scrolled to a spot behind the fixed player or navigation. */
+html:has(.shell.withPlayer) {
+  scroll-padding-bottom: var(--player);
+}
+
+/* An installed iPhone app draws under the status bar (black-translucent). */
+.shell {
+  padding-top: env(safe-area-inset-top);
+}
+
+.auth,
+main.centered {
+  padding-top: max(32px, env(safe-area-inset-top));
+}
+
+@media (min-width: 1001px) {
+  .sidebar {
+    padding-top: max(24px, env(safe-area-inset-top));
+  }
+}
+
+@media (max-width: 1000px) {
+  html {
+    --toast-offset: calc(var(--bottom-nav) + env(safe-area-inset-bottom));
+    scroll-padding-bottom: calc(var(--bottom-nav) + env(safe-area-inset-bottom));
+  }
+
+  html:has(.shell.withPlayer) {
+    --toast-offset: calc(var(--bottom-nav) + var(--player) + env(safe-area-inset-bottom));
+    scroll-padding-bottom: calc(var(--bottom-nav) + var(--player) + env(safe-area-inset-bottom));
+  }
+
+  /* Narrow screens wrap a long error: the player grows rather than hiding it. */
+  .playerError {
+    white-space: normal;
+  }
+}
+
+/* Phones in landscape: a two-row player and a slimmer navigation bar. */
+@media (max-width: 1000px) and (max-height: 500px) {
+  :root {
+    --player: 100px;
+    --bottom-nav: 52px;
+  }
+
+  .player {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    gap: 0 12px;
+    padding-block: 4px;
+  }
+
+  .playerNow {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .playerControls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .playerEnd {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .playerSeek {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .playerNow .artwork {
+    width: 44px;
+  }
+
+  .bottomNav .navLink {
+    padding-block: 4px;
   }
 }

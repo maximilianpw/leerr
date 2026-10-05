@@ -1,0 +1,14 @@
+# Optional additions. Copy to compose.override.yaml (docker compose reads it
+# automatically) and keep the parts you need.
+services:
+  leerr:
+    environment:
+      # Daily consistent backups, keeping the newest 7. The host directory must be writable by UID 1000.
+      LEERR_BACKUP_DIR: /backups
+      LEERR_BACKUP_HOURS: "24"
+      LEERR_BACKUP_KEEP: "7"
+      # Trust a private CA (or a self-signed certificate) for Jellyfin or Lidarr.
+      NODE_EXTRA_CA_CERTS: /etc/leerr/ca.pem
+    volumes:
+      - ./backups:/backups
+      - ./home-ca.pem:/etc/leerr/ca.pem:ro

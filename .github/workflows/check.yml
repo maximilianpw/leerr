@@ -1,0 +1,54 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Hosted runners have the memory the Oxlint plugin needs (see docs/development.md#lint).
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:web
+      - run: npm audit --omit=dev
+
+  # Dependabot rewrites package-lock.json; npmDepsHash in nix/package.nix must
+  # follow, or every Nix consumer breaks. On a mismatch, put the hash the error
+  # prints into nix/package.nix on the same branch.
+  nix-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: npmDepsHash matches package-lock.json
+        run: nix build ".#leerr.npmDeps" -L --no-link
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --tag leerr:ci .
+      - name: The image starts and answers its health check
+        run: |
+          node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))' > key
+          chmod 644 key
+          docker run -d --name leerr -e LEERR_ORIGIN=https://leerr.test -e LEERR_KEY_FILE=/key -v "$PWD/key:/key:ro" -p 3000:3000 leerr:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs leerr
+          exit 1
