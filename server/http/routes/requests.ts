@@ -1,8 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import type { LibrarySummary } from "../../library.ts";
-import { UpstreamError } from "../../upstream/index.ts";
-import { hasJellyfin, jellyfinAccess, lidarrAccess, mbid, type AppContext } from "../context.ts";
+import { albumKey, type LibrarySummary } from "../../library.ts";
+import { hasPlex, lidarrAccess, mbid, plexUnavailable, withPlex, type AppContext } from "../context.ts";
 import { APIError, notFound } from "../errors.ts";
 
 // Outcomes the Requests badge counts until the person's Requests page has shown them.
@@ -12,13 +11,13 @@ const requestStatus = z.enum(["requested", "acquiring", "imported", "available",
 export function requestRoutes(app: FastifyInstance, context: AppContext) {
   const { store, auth, upstream, log } = context;
 
-  /** Best effort: requests keep working while Jellyfin is down or the saved sign-in is stale. */
+  /** Best effort: requests keep working while Plex is down or the saved sign-in is stale. */
   async function librarySummary(userID: string): Promise<LibrarySummary | null> {
-    if (!hasJellyfin(context, userID)) return null;
+    if (!hasPlex(context, userID)) return null;
     try {
-      return await context.library.summary(userID, jellyfinAccess(context, userID));
+      return await withPlex(context, userID, (access) => context.library.summary(userID, access));
     } catch (cause) {
-      if (cause instanceof UpstreamError) return null;
+      if (plexUnavailable(cause)) return null;
       throw cause;
     }
   }
@@ -58,18 +57,21 @@ export function requestRoutes(app: FastifyInstance, context: AppContext) {
       items: rows.map((row) => {
         const albumID = library?.groups.get(row.releaseGroupMBID) ?? null;
         const status = albumID ? "available" : row.status;
+        // Imported, and an album of that name is in Plex: Plex matched it to nothing, or to another album.
+        const unmatchedAlbumID = status === "imported" ? (library?.byName.get(albumKey(row.artist, row.title)) ?? null) : null;
         return {
           id: row.requestID,
           releaseGroupMBID: row.releaseGroupMBID,
           releaseMBID: row.releaseMBID,
           title: row.title,
           artist: row.artist,
-          // "available" is per user: this user's Jellyfin account can see the album.
+          // "available" is per user: this person's Plex account can see the album.
           status,
           unseen: noticeable.has(status) && row.seenStatus !== status,
           reason: albumID ? null : row.reason,
           retryable: !albumID && (row.status === "failed" || row.status === "attention"),
           albumID,
+          unmatchedAlbumID,
           requestedAt: new Date(row.requestedAt).toISOString(),
           updatedAt: new Date(row.updatedAt).toISOString(),
         };

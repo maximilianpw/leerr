@@ -2,6 +2,7 @@ import { ArrowLeft, ListEnd, ListPlus, ListStart, Pause, Play, Shuffle } from "l
 import { useEffect, useRef, useState } from "react";
 import { albumDetailSchema, artworkURL, request, type Track } from "../api.ts";
 import { useResource } from "../hooks.ts";
+import { playable } from "../playback.ts";
 import { useEnqueue, usePlayer } from "../player.tsx";
 import { goBack, Link } from "../router.tsx";
 import { AddToPlaylist, FavoriteButton, TrackList } from "../tracks.tsx";
@@ -45,22 +46,23 @@ export function AlbumPage({ id }: { id: string }) {
           Album unavailable
         </h1>
         <ErrorBox message={detail.error || "This album could not be loaded."} retry={detail.reload} />
-        {detail.code === "jellyfin_reconnect" && <Link to="/settings">Reconnect Jellyfin in Settings</Link>}
+        {detail.code === "plex_reconnect" && <Link to="/settings">Sign in to Plex again in Settings</Link>}
       </div>
     );
 
   const { album } = detail.data;
   // The queue needs to know where each track comes from (artwork, the link back here).
   const tracks = detail.data.tracks.map((track) => ({ ...track, albumID: album.id, albumTitle: album.title }));
+  const ready = playable(tracks);
   const playingHere = player.current?.albumID === album.id;
   const total = tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0);
   const play = (shuffle: boolean) => {
     if (shuffle) {
-      player.controller.playShuffled(tracks);
+      player.controller.playShuffled(ready);
       return;
     }
     player.controller.setShuffle(false);
-    player.controller.playQueue(tracks, 0);
+    player.controller.playQueue(ready, 0);
   };
 
   return (
@@ -83,6 +85,7 @@ export function AlbumPage({ id }: { id: string }) {
               album.artist
             )}
           </p>
+          {!album.available && <p className="notice">This album is in Plex's trash: its files are gone until someone restores them or Plex empties the trash.</p>}
           <p className="muted">
             {[album.year, `${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}`, total ? formatDuration(total) : ""]
               .filter((part) => part)
@@ -100,22 +103,22 @@ export function AlbumPage({ id }: { id: string }) {
             <button
               type="button"
               className="primary"
-              disabled={!tracks.length}
+              disabled={!ready.length}
               onClick={() => (playingHere ? player.controller.toggle() : play(false))}
             >
               {playingHere && player.playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
               {playingHere && player.playing ? "Pause" : playingHere && !player.loading ? "Resume" : "Play album"}
             </button>
-            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => play(true)}>
+            <button type="button" className="secondary" disabled={!ready.length} onClick={() => play(true)}>
               <Shuffle aria-hidden="true" /> Shuffle
             </button>
-            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => enqueue(tracks, "next")}>
+            <button type="button" className="secondary" disabled={!ready.length} onClick={() => enqueue(ready, "next")}>
               <ListStart aria-hidden="true" /> Play next
             </button>
-            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => enqueue(tracks, "end")}>
+            <button type="button" className="secondary" disabled={!ready.length} onClick={() => enqueue(ready, "end")}>
               <ListEnd aria-hidden="true" /> Add to queue
             </button>
-            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => setAdding(tracks)}>
+            <button type="button" className="secondary" disabled={!ready.length} onClick={() => setAdding(ready)}>
               <ListPlus aria-hidden="true" /> Add to playlist
             </button>
             <FavoriteButton itemID={album.id} name={album.title} initial={album.favorite} />

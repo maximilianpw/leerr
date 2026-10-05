@@ -35,16 +35,21 @@ export interface AudioLike extends EventTarget {
   getAttribute(name: string): string | null;
 }
 export type PlaybackServices = {
-  ticket: (trackID: string) => Promise<{ url: string; expiresAt: string }>;
-  /** Best effort, never rejects; `keepalive` lets the last report outlive the page. */
-  report: (event: PlaybackEvent, trackID: string, position: number, paused: boolean, keepalive: boolean) => Promise<void> | void;
+  /** `transcoded`: Plex converts the track, so the stream cannot be ranged and seeking restarts it. */
+  ticket: (trackID: string) => Promise<{ url: string; expiresAt: string; transcoded?: boolean }>;
+  /**
+   * Best effort, never rejects; `keepalive` lets the last report outlive the
+   * page. May resolve with Plex's reason for ending playback.
+   */
+  report: (event: PlaybackEvent, trackID: string, position: number, paused: boolean, keepalive: boolean) => Promise<string | null | void> | void;
   /** Why a stream URL fails, in the server's words, or null when it serves audio fine. */
   probe: (url: string) => Promise<string | null>;
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
   now: () => number;
 };
 
-const PROGRESS_REPORT = 30_000;
+// Plex expects a timeline report about every ten seconds while playing.
+const PROGRESS_REPORT = 10_000;
 const SAVE_EVERY = 5_000;
 const MAX_SAVED = 1_000;
 // A prefetched ticket must still admit the stream when the track starts.
@@ -83,7 +88,7 @@ export class PlaybackController {
   readonly #positionListeners = new Set<() => void>();
   #generation = 0;
   #recovered = false;
-  /** The track Jellyfin was told started; its stop must name it even after the queue moved on. */
+  /** The track Plex was told started; its stop must name it even after the queue moved on. */
   #started: Track | null = null;
   /** Whether the load in flight should start playing when its stream arrives. */
   #wantPlay = false;
@@ -91,7 +96,10 @@ export class PlaybackController {
   #lastSave = 0;
   /** A restored queue starts paused here; the first play loads from this point. */
   #resumeAt: number | null = null;
-  #prefetched: { trackID: string; url: string; expiresAt: number } | null = null;
+  #prefetched: { trackID: string; url: string; expiresAt: number; transcoded: boolean } | null = null;
+  /** The stream attached now. A converted one starts `#offset` seconds into the track. */
+  #stream: { url: string; transcoded: boolean } | null = null;
+  #offset = 0;
   #attached = false;
   readonly #handlers: Array<[string, () => void]>;
 
@@ -106,7 +114,8 @@ export class PlaybackController {
       ["canplay", () => this.#set({ loading: false })],
       ["timeupdate", () => this.#onTime()],
       ["durationchange", () => {
-        if (Number.isFinite(this.#audio.duration)) this.#set({ duration: this.#audio.duration });
+        // A converted stream only knows its own length from where it started; the track's length stays.
+        if (Number.isFinite(this.#audio.duration) && !this.#stream?.transcoded) this.#set({ duration: this.#audio.duration });
       }],
       ["ended", () => this.#onEnded()],
       ["error", () => this.#onError()],
@@ -145,7 +154,8 @@ export class PlaybackController {
   };
 
   /** Every track in random order, the first one included. */
-  playShuffled(items: Track[]) {
+  playShuffled(tracks: Track[]) {
+    const items = playable(tracks);
     if (!items.length) return;
     const order = shuffled(items.map((_, position) => position));
     this.#original = items.map((_, position) => order.indexOf(position));
@@ -153,9 +163,11 @@ export class PlaybackController {
     void this.#load(0, true);
   }
 
-  playQueue(items: Track[], start: number) {
-    if (!items.length) return;
-    const first = Math.min(Math.max(start, 0), items.length - 1);
+  playQueue(tracks: Track[], start: number) {
+    const chosen = tracks[Math.min(Math.max(start, 0), tracks.length - 1)];
+    const items = playable(tracks);
+    if (!chosen?.available || !items.length) return;
+    const first = items.indexOf(chosen);
     if (this.#state.shuffle) {
       // order[q] is the album position played q-th; #original maps album positions back to the queue.
       const order = [first, ...shuffled(items.flatMap((_, position) => (position === first ? [] : [position])))];
@@ -172,7 +184,8 @@ export class PlaybackController {
    * Adds tracks right after the current one, or at the end, without
    * interrupting it. With nothing playing they start at once: "playing".
    */
-  enqueue(items: Track[], where: "next" | "end"): "queued" | "playing" | null {
+  enqueue(tracks: Track[], where: "next" | "end"): "queued" | "playing" | null {
+    const items = playable(tracks);
     if (!items.length) return null;
     if (!this.#state.current) {
       this.playQueue(items, 0);
@@ -269,7 +282,7 @@ export class PlaybackController {
       if (this.#state.loading && !this.#audio.error) {
         this.#wantPlay = true;
         this.#set({});
-      } else void this.#load(this.#resumeAt ?? this.#audio.currentTime, true);
+      } else void this.#load(this.#resumeAt ?? this.#time(), true);
       return;
     }
     if (!this.#audio.paused) return;
@@ -296,7 +309,7 @@ export class PlaybackController {
   previous() {
     const { index, queue, repeat } = this.#state;
     // A restored queue has no stream yet: its position is where it will resume.
-    const position = this.#resumeAt ?? this.#audio.currentTime;
+    const position = this.#resumeAt ?? this.#time();
     if (position > 3 || (index === 0 && repeat !== "all")) this.seek(0);
     else this.jumpTo(index > 0 ? index - 1 : queue.length - 1);
   }
@@ -312,8 +325,30 @@ export class PlaybackController {
       this.#setPosition(this.#resumeAt);
       return;
     }
+    if (this.#stream?.transcoded) {
+      this.#restart(Math.max(0, seconds));
+      return;
+    }
     this.#audio.currentTime = Math.max(0, seconds);
     this.#setPosition(this.#audio.currentTime);
+  }
+
+  /** Seconds into the track: a converted stream's own clock starts where it was asked to. */
+  #time(): number {
+    return this.#offset + this.#audio.currentTime;
+  }
+  /** A converted stream cannot be ranged: seeking asks Plex to start converting from there. */
+  #restart(seconds: number) {
+    const stream = this.#stream;
+    if (!stream) return;
+    const resume = this.intendsToPlay();
+    this.#offset = seconds;
+    this.#audio.src = `${stream.url}?start=${seconds}`;
+    this.#setPosition(seconds);
+    if (resume)
+      this.#audio.play().catch((cause: Error) => {
+        if (!quietPlayErrors.has(cause.name)) this.#set({ error: errorMessage(cause, "Playback failed.") });
+      });
   }
 
   stop() {
@@ -329,14 +364,14 @@ export class PlaybackController {
     if (this.#storageKey) this.#services.storage?.removeItem(this.#storageKey);
   }
 
-  /** The page is going away: tell Jellyfin, and keep the position for next time. */
+  /** The page is going away: tell Plex, and keep the position for next time. */
   pageHidden() {
     this.#reportStop(true);
     this.#save(true);
   }
 
   /**
-   * Before signing out: pause and tell Jellyfin the track stopped while the
+   * Before signing out: pause and tell Plex the track stopped while the
    * session still exists. The queue stays. Resolves once the report is done.
    */
   async halt(): Promise<void> {
@@ -372,14 +407,16 @@ export class PlaybackController {
     this.#audio.pause();
     this.#audio.removeAttribute("src");
     this.#audio.load();
+    this.#stream = null;
+    this.#offset = 0;
   }
 
   /** The prefetched ticket for this track, if still fresh; a ticket for another track is kept. */
-  #takePrefetched(trackID: string): string | null {
+  #takePrefetched(trackID: string): { url: string; transcoded: boolean } | null {
     const prefetched = this.#prefetched;
     if (!prefetched || prefetched.trackID !== trackID) return null;
     this.#prefetched = null;
-    return prefetched.expiresAt - this.#services.now() > TICKET_MARGIN ? prefetched.url : null;
+    return prefetched.expiresAt - this.#services.now() > TICKET_MARGIN ? prefetched : null;
   }
 
   async #load(resumeAt: number, autoplay: boolean) {
@@ -395,10 +432,17 @@ export class PlaybackController {
     this.#set({ loading: true, error: "", playing: false, duration: item.duration ?? 0 });
     this.#setPosition(resumeAt);
     try {
-      const url = this.#takePrefetched(item.id) ?? (await this.#services.ticket(item.id)).url;
+      const ticket = this.#takePrefetched(item.id) ?? (await this.#services.ticket(item.id));
       if (attempt !== this.#generation) return;
-      this.#audio.src = url;
-      if (resumeAt) this.#audio.currentTime = resumeAt;
+      const transcoded = ticket.transcoded === true;
+      this.#stream = { url: ticket.url, transcoded };
+      if (transcoded) {
+        this.#offset = resumeAt;
+        this.#audio.src = resumeAt ? `${ticket.url}?start=${resumeAt}` : ticket.url;
+      } else {
+        this.#audio.src = ticket.url;
+        if (resumeAt) this.#audio.currentTime = resumeAt;
+      }
       // Read after the wait: pause() or play() meanwhile changed the intent.
       const play = this.#wantPlay;
       this.#wantPlay = false;
@@ -421,28 +465,31 @@ export class PlaybackController {
     if (current && !this.#started) {
       this.#started = current;
       this.#lastProgress = this.#services.now();
-      void this.#services.report("start", current.id, this.#audio.currentTime, false, false);
+      this.#report("start", current.id, this.#time(), false, false);
       this.#prefetchNext();
     }
   }
   #onPause() {
     this.#set({ playing: false });
-    if (this.#started) void this.#services.report("progress", this.#started.id, this.#audio.currentTime, true, false);
+    if (this.#started) this.#report("progress", this.#started.id, this.#time(), true, false);
     this.#save(true);
   }
   #onTime() {
-    this.#setPosition(this.#audio.currentTime);
+    this.#setPosition(this.#time());
     const now = this.#services.now();
     if (this.#started && !this.#audio.paused && now - this.#lastProgress >= PROGRESS_REPORT) {
       this.#lastProgress = now;
-      void this.#services.report("progress", this.#started.id, this.#audio.currentTime, false, false);
+      this.#report("progress", this.#started.id, this.#time(), false, false);
     }
     this.#save(false);
   }
   #onEnded() {
     this.#reportStop(false);
     if (this.#state.repeat === "one") {
-      this.#audio.currentTime = 0;
+      if (this.#stream?.transcoded) {
+        this.#offset = 0;
+        this.#audio.src = this.#stream.url;
+      } else this.#audio.currentTime = 0;
       void this.#audio.play().catch(() => this.#set({ playing: false }));
       return;
     }
@@ -460,7 +507,7 @@ export class PlaybackController {
     if (!this.#recovered) {
       // E.g. the ticket expired during a long pause: one fresh ticket, same position.
       this.#recovered = true;
-      void this.#load(this.#audio.currentTime, true);
+      void this.#load(this.#time(), true);
       return;
     }
     const attempt = this.#generation;
@@ -473,11 +520,21 @@ export class PlaybackController {
   }
 
   /** Must run before the element is detached, so the position is the outgoing track's. */
-  #reportStop(keepalive: boolean): Promise<void> | void {
+  #reportStop(keepalive: boolean): Promise<string | null | void> | void {
     const started = this.#started;
     if (!started) return;
     this.#started = null;
-    return this.#services.report("stop", started.id, this.#audio.currentTime, true, keepalive);
+    return this.#services.report("stop", started.id, this.#time(), true, keepalive);
+  }
+  /** Plex can end a playback (for example its owner stopped it): the player then stops and says why. */
+  #report(event: "start" | "progress", trackID: string, position: number, paused: boolean, keepalive: boolean) {
+    const reply = this.#services.report(event, trackID, position, paused, keepalive);
+    if (!reply) return;
+    void reply.then((stopped) => {
+      if (!stopped || this.#started?.id !== trackID) return;
+      this.pause();
+      this.#set({ error: stopped });
+    });
   }
 
   #prefetchNext() {
@@ -488,7 +545,8 @@ export class PlaybackController {
     this.#services
       .ticket(next.id)
       .then((ticket) => {
-        if (attempt === this.#generation) this.#prefetched = { trackID: next.id, url: ticket.url, expiresAt: Date.parse(ticket.expiresAt) };
+        if (attempt === this.#generation)
+          this.#prefetched = { trackID: next.id, url: ticket.url, expiresAt: Date.parse(ticket.expiresAt), transcoded: ticket.transcoded === true };
       })
       .catch(() => {
         // Optional: the track fetches its own ticket when it starts.
@@ -557,6 +615,9 @@ export class PlaybackController {
 }
 
 /** Fisher–Yates; a copy, the input is left alone. */
+/** Tracks in Plex's trash have no file left to play. */
+export const playable = (tracks: Track[]) => tracks.filter((track) => track.available);
+
 function shuffled<T>(items: T[]): T[] {
   const copy = [...items];
   for (let at = copy.length - 1; at > 0; at--) {

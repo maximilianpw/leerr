@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { z } from "zod";
-import { identities } from "../testing.ts";
+import { identities, plexIDs } from "../testing.ts";
 import type { JsonValue } from "../upstream/http.ts";
 import { harness, PASSWORD, type Client } from "./harness.ts";
 
@@ -98,7 +98,18 @@ test("every documented JSON response body matches its schema, for real calls to 
   const zoe = z.object({ id: z.string() }).parse(created.json()).id;
   await check("PATCH", "/api/v1/admin/users/{id}", `/api/v1/admin/users/${zoe}`, admin, 200, { disabled: true });
   await check("GET", "/api/v1/admin/settings", "/api/v1/admin/settings", admin, 200);
-  await check("PUT", "/api/v1/admin/settings/jellyfin", "/api/v1/admin/settings/jellyfin", admin, 200, { url: "https://jellyfin.test" });
+  await check("PUT", "/api/v1/admin/settings/plex", "/api/v1/admin/settings/plex", admin, 200, { url: "https://plex.test" });
+  await check("PUT", "/api/v1/admin/settings/plex/section", "/api/v1/admin/settings/plex/section", admin, 200, { key: null });
+  await check("GET", "/api/v1/admin/plex/sections", "/api/v1/admin/plex/sections", admin, 200);
+  const profileLink = await check("POST", "/api/v1/admin/users/{id}/plex/links", `/api/v1/admin/users/${zoe}/plex/links`, admin, 200, {});
+  const profileLinkID = z.object({ id: z.string() }).parse(profileLink.json()).id;
+  h.upstream.approvePin("admin-account");
+  await check("GET", "/api/v1/connections/plex/links/{id}", `/api/v1/connections/plex/links/${profileLinkID}`, admin, 200);
+  await check("POST", "/api/v1/connections/plex/links/{id}/profile", `/api/v1/connections/plex/links/${profileLinkID}/profile`, admin, 200, {
+    uuid: "kid-uuid",
+    pin: "1234",
+  });
+  await check("DELETE", "/api/v1/admin/users/{id}/plex", `/api/v1/admin/users/${zoe}/plex`, admin, 200);
   await check("PUT", "/api/v1/admin/settings/lidarr", "/api/v1/admin/settings/lidarr", admin, 200, { url: "https://lidarr.test" });
   await check("PUT", "/api/v1/admin/settings/lastfm", "/api/v1/admin/settings/lastfm", admin, 200, { apiKey: "lastfm-key" });
   await check("PUT", "/api/v1/admin/settings/notifications", "/api/v1/admin/settings/notifications", admin, 200, {
@@ -109,23 +120,27 @@ test("every documented JSON response body matches its schema, for real calls to 
   await check("GET", "/api/v1/admin/lidarr/options", "/api/v1/admin/lidarr/options", admin, 200);
 
   await check("GET", "/api/v1/connections", "/api/v1/connections", member, 200);
-  await check("PUT", "/api/v1/connections/jellyfin", "/api/v1/connections/jellyfin", stranger, 200, { username: "member", password: "jelly-password" });
+  const link = await check("POST", "/api/v1/connections/plex/links", "/api/v1/connections/plex/links", stranger, 200, {});
+  const linkID = z.object({ id: z.string() }).parse(link.json()).id;
+  await check("GET", "/api/v1/connections/plex/links/{id}", `/api/v1/connections/plex/links/${linkID}`, stranger, 200);
+  await check("POST", "/api/v1/connections/plex/links/{id}/profile", `/api/v1/connections/plex/links/${linkID}/profile`, stranger, 409, { uuid: "kid-uuid" });
+  await check("GET", "/api/v1/connections/plex/links/{id}", "/api/v1/connections/plex/links/not-an-id", stranger, 400);
   await check("PUT", "/api/v1/connections/lastfm", "/api/v1/connections/lastfm", member, 200, { username: "mia-fm" });
   await check("DELETE", "/api/v1/connections/{service}", "/api/v1/connections/lastfm", member, 200);
 
   await check("GET", "/api/v1/library", "/api/v1/library?sort=year", admin, 200);
   await check("GET", "/api/v1/library/artists", "/api/v1/library/artists", admin, 200);
-  await check("GET", "/api/v1/albums/{id}", "/api/v1/albums/available", admin, 200);
-  await check("GET", "/api/v1/albums/{id}", "/api/v1/albums/available", member, 404);
+  await check("GET", "/api/v1/albums/{id}", `/api/v1/albums/${plexIDs.album}`, admin, 200);
+  await check("GET", "/api/v1/albums/{id}", `/api/v1/albums/${plexIDs.album}`, member, 404);
   await check("GET", "/api/v1/playlists", "/api/v1/playlists", admin, 200);
-  await check("GET", "/api/v1/playlists/{id}", "/api/v1/playlists/dinner", admin, 200);
-  await check("POST", "/api/v1/playlists/{id}/tracks", "/api/v1/playlists/dinner/tracks", admin, 200, { trackIDs: ["tone"] });
-  await check("PUT", "/api/v1/favorites/{id}", "/api/v1/favorites/available", admin, 200);
-  await check("DELETE", "/api/v1/favorites/{id}", "/api/v1/favorites/available", admin, 200);
-  await check("POST", "/api/v1/playback", "/api/v1/playback", admin, 200, { trackID: "tone", event: "start", position: 0 });
-  await check("GET", "/api/v1/artwork/{id}", "/api/v1/artwork/available?size=large", admin, 200);
-  await check("GET", "/api/v1/artwork/{id}", "/api/v1/artwork/untagged", admin, 404);
-  const ticket = await check("POST", "/api/v1/stream-tickets", "/api/v1/stream-tickets", admin, 200, { trackID: "tone" });
+  await check("GET", "/api/v1/playlists/{id}", `/api/v1/playlists/${plexIDs.playlist}`, admin, 200);
+  await check("POST", "/api/v1/playlists/{id}/tracks", `/api/v1/playlists/${plexIDs.playlist}/tracks`, admin, 200, { trackIDs: [plexIDs.track] });
+  await check("PUT", "/api/v1/favorites/{id}", `/api/v1/favorites/${plexIDs.album}`, admin, 200);
+  await check("DELETE", "/api/v1/favorites/{id}", `/api/v1/favorites/${plexIDs.album}`, admin, 200);
+  await check("POST", "/api/v1/playback", "/api/v1/playback", admin, 200, { trackID: plexIDs.track, event: "start", position: 0 });
+  await check("GET", "/api/v1/artwork/{id}", `/api/v1/artwork/${plexIDs.album}?size=large`, admin, 200);
+  await check("GET", "/api/v1/artwork/{id}", `/api/v1/artwork/${plexIDs.untagged}`, admin, 404);
+  const ticket = await check("POST", "/api/v1/stream-tickets", "/api/v1/stream-tickets", admin, 200, { trackID: plexIDs.track });
   const streamURL = z.object({ url: z.string() }).parse(ticket.json()).url;
   await check("GET", "/api/v1/streams/{ticket}", streamURL, null, 200);
   await check("GET", "/api/v1/streams/{ticket}", streamURL, null, 206, undefined, { range: "bytes=0-3" });

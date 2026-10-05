@@ -43,7 +43,8 @@ runs worker passes until nothing is due.
 | `api.test.ts` | Connections, library, favourites, playlists, playback reporting, requests and withdrawals, discovery, admin settings, notifications, status |
 | `acquisitions.test.ts` | The Lidarr state machine: edition pinning, unknown-outcome mutations, grace periods, the download queue, deadlines, retries, concurrency, notifications |
 | `streams.test.ts` | Range/416, ticket admission, revocation aborting live streams, stream limits and slot release, shutdown with open streams |
-| `upstream.test.ts` | Wire contracts for Jellyfin, Lidarr, MusicBrainz, Last.fm and notification targets against stub `fetch` |
+| `upstream.test.ts` | Wire contracts for Lidarr, MusicBrainz, Last.fm and notification targets against stub `fetch` |
+| `plex.test.ts` | Wire contracts for the Plex Media Server and plex.tv (sign-in, server tokens, Home profiles) against stub `fetch` |
 | `store.test.ts` | Encryption, schema migrations, compare-and-set updates, deployment settings, backups, the operator CLI (restore, running-server detection) |
 | `static.test.ts` | Web asset caching, install files and the single-page-app fallback |
 | `contract.test.ts` | Every API route matches `docs/openapi.yaml` in both directions, and every documented operation is called and its JSON response validated against its schema |

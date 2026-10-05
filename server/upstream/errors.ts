@@ -3,7 +3,7 @@ export type UpstreamCode =
   | "upstream_unavailable"
   | "upstream_protocol"
   | "upstream_rejected"
-  | "jellyfin_reconnect"
+  | "plex_reconnect"
   | "invalid_endpoint";
 
 /**
@@ -18,7 +18,7 @@ const defaultMessages: Record<UpstreamCode, string> = {
   upstream_unavailable: "The upstream service is unavailable.",
   upstream_protocol: "The upstream service returned an invalid response.",
   upstream_rejected: "The upstream service rejected the request.",
-  jellyfin_reconnect: "Reconnect Jellyfin in Settings → Connections.",
+  plex_reconnect: "Sign in to Plex again in Settings → Connections.",
   invalid_endpoint:
     "Enter an HTTPS server URL without embedded credentials, query parameters, or a fragment.",
 };

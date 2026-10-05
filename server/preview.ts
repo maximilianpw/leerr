@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import { buildApp } from "./http/app.ts";
 import { logEvent } from "./log.ts";
 import { hashPassword } from "./passwords.ts";
-import { configuredSettings, FakeUpstreams, fixtureAlbum, identities, makeStore } from "./testing.ts";
-import { UpstreamError, type Album, type AlbumDetail, type Artwork, type ArtworkSize, type JellyfinAccess } from "./upstream/index.ts";
+import { configuredSettings, FakeUpstreams, fixtureAlbum, identities, makeStore, plexIDs, plexLinkFor } from "./testing.ts";
+import { UpstreamError, type Album, type AlbumDetail, type Artwork, type ArtworkSize, type PlayableTrack, type PlexAccess } from "./upstream/index.ts";
 
 const covers = ["evening", "coastal", "rooms"].map((name) =>
   readFileSync(new URL(`./fixtures/cover-${name}.png`, import.meta.url)),
@@ -29,50 +29,55 @@ class PreviewUpstreams extends FakeUpstreams {
     super();
     const albums: Album[] = [
       fixtureAlbum({
-        id: "available",
+        id: plexIDs.album,
         title: identities.album.title,
         artist: identities.album.artist,
-        artistID: "artist-quiet",
+        artistID: plexIDs.artist,
         artistMBID: identities.album.artistMBID,
         year: 2024,
-        releaseGroupMBID: identities.album.releaseGroupMBID,
         releaseMBID: identities.album.releaseMBID,
       }),
       ...titles.map((title, index) =>
         fixtureAlbum({
-          id: `preview-${index}`,
+          id: String(110 + index),
           title,
           artist: ["Coastal Lines", "Mira Sol", "Northbound"][index % 3],
-          artistID: `artist-${index % 3}`,
+          artistID: String(510 + (index % 3)),
           year: 2015 + index,
           // One deliberately missing cover keeps the placeholder visible.
           hasArtwork: index !== 7,
+          // One album in Plex's trash shows how deleted files look.
+          available: index !== 5,
         }),
       ),
     ];
-    this.libraries.set("admin-jelly-token", albums);
+    this.libraries.set("admin-plex-token", albums);
   }
-  override async jellyfinAlbum(access: JellyfinAccess, albumID: string): Promise<AlbumDetail> {
-    const detail = await super.jellyfinAlbum(access, albumID);
+  /** Five tracks per album, numbered album id × 10 + n; the last of "Frequencies" is in Plex's trash. */
+  override async plexAlbum(access: PlexAccess, albumID: string): Promise<AlbumDetail> {
+    const detail = await super.plexAlbum(access, albumID);
     const names = ["Opening", "Low Tide", "Paper Lanterns", "Northern Line", "Closing Time"];
     return {
       album: detail.album,
       tracks: names.map((title, index) => ({
         ...detail.tracks[0],
-        id: `${albumID}-t${index + 1}`,
+        id: String(Number(albumID) * 10 + index + 1),
         title,
         number: index + 1,
         artist: detail.album.artist,
         albumID,
         albumTitle: detail.album.title,
+        available: detail.album.available && !(albumID === "116" && index === names.length - 1),
       })),
     };
   }
-  override async jellyfinArtwork(access: JellyfinAccess, itemID: string, _size: ArtworkSize): Promise<Artwork> {
-    const { album } = await super.jellyfinAlbum(access, itemID);
+  override async plexTrack(access: PlexAccess, trackID: string): Promise<PlayableTrack> {
+    return { ...(await super.plexTrack(access, plexIDs.track)), id: trackID };
+  }
+  override async plexArtwork(access: PlexAccess, itemID: string, _size: ArtworkSize): Promise<Artwork> {
+    const { album } = await super.plexAlbum(access, itemID);
     if (!album.hasArtwork) throw new UpstreamError("upstream_rejected", 404, "No artwork.", "not_applied");
-    const index = itemID === "available" ? 0 : (Number(itemID.slice(8)) + 1) % covers.length;
-    return { type: "image/png", bytes: covers[index] };
+    return { type: "image/png", bytes: covers[Number(itemID) % covers.length] };
   }
 }
 
@@ -83,11 +88,11 @@ if (!process.env.LEERR_PREVIEW_SETUP) {
   const admin = store.createUser("preview", await hashPassword("preview-password"), "admin", now);
   store.saveSettings({
     ...configuredSettings,
-    jellyfinURL: "https://jellyfin.fixture.invalid",
+    plexURL: "https://plex.fixture.invalid",
     lidarrURL: "https://lidarr.fixture.invalid",
     lidarrKey: "fixture-key",
   });
-  store.putSecret(admin.id, "jellyfin", JSON.stringify({ token: "admin-jelly-token", userID: "jf-admin", username: "preview" }));
+  store.putSecret(admin.id, "plex", JSON.stringify(plexLinkFor("admin", "preview")));
   const imported = store.request(admin.id, identities.album, now - 86_400_000);
   store.updateAcquisition(imported.acquisition.id, {}, { status: "imported", phase: "finished", nextAt: Number.MAX_SAFE_INTEGER }, now);
   // Leave the Lidarr fake empty for the second album so the worker demonstrates progress.

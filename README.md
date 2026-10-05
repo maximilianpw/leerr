@@ -1,19 +1,22 @@
 # Leerr
 
 Leerr is a self-hosted music app for a household or small group sharing one
-Jellyfin library and one Lidarr:
+Plex Media Server and one Lidarr:
 
 - **Discover** albums through MusicBrainz search, artist discographies, new
   releases from artists you own, and suggestions from Last.fm or your library.
 - **Request** a specific edition; Leerr hands it to Lidarr, makes sure Lidarr
   keeps that edition, and follows it until it lands in your library, with clear
   failure states, retry and optional notifications (ntfy, Discord, webhooks).
-- **Play** your Jellyfin library in the browser, streaming original files, with
-  a queue, shuffle and repeat, favourites and Jellyfin playlists. Playback is
-  reported to Jellyfin, so play counts and scrobbler plugins keep working.
+- **Play** your Plex music in the browser, streaming original files (Plex
+  converts the few formats browsers cannot play, such as ALAC), with a queue,
+  shuffle and repeat, favourites (Plex's five stars, shared with Plexamp) and
+  Plex playlists. Playback is reported to Plex, so "now playing", play counts
+  and history keep working.
 
-Each person signs in to Leerr and connects their own Jellyfin account, so they
-only ever see what Jellyfin lets them see.
+Each person signs in to Leerr and then with their own Plex account, on Plex's
+own page, so they only ever see what Plex lets them see. Managed Plex Home
+profiles are supported too.
 
 One Node.js process serves the React web app, the `/api/v1` JSON API, the audio
 stream proxy and a background worker that drives Lidarr, all backed by one

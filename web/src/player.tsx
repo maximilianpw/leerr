@@ -11,8 +11,8 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { artworkURL, request, sendInBackground, streamProblem, ticketSchema, type Track } from "./api.ts";
-import { PlaybackController, type PlayerState } from "./playback.ts";
+import { artworkURL, reportPlayback, request, streamProblem, ticketSchema, type Track } from "./api.ts";
+import { PlaybackController, playable, type PlayerState } from "./playback.ts";
 import { Link } from "./router.tsx";
 import { Artwork, focusLost, formatDuration } from "./ui.tsx";
 
@@ -55,7 +55,8 @@ export function useEnqueue(): (items: Track[], where: "next" | "end") => void {
     (items, where) => {
       const outcome = controller.enqueue(items, where);
       if (!outcome) return;
-      const subject = items.length === 1 ? `“${items[0].title}”` : `${items.length} tracks`;
+      const queued = playable(items);
+      const subject = queued.length === 1 ? `“${queued[0].title}”` : `${queued.length} tracks`;
       announce(
         outcome === "playing"
           ? `Playing ${subject}`
@@ -68,8 +69,9 @@ export function useEnqueue(): (items: Track[], where: "next" | "end") => void {
   );
 }
 
-export const storageKey = (userID: string) => `leerr.player.${userID}`;
-export const storagePrefix = "leerr.player.";
+// "queue", not the earlier "player": those queues name Jellyfin items.
+export const storageKey = (userID: string) => `leerr.queue.${userID}`;
+export const storagePrefix = "leerr.queue.";
 
 /** One player per signed-in user; its queue survives reloads in this browser only. */
 export function createController(userID: string): PlaybackController {
@@ -78,7 +80,7 @@ export function createController(userID: string): PlaybackController {
     {
       ticket: (trackID) => request("/stream-tickets", ticketSchema, { method: "POST", body: JSON.stringify({ trackID }) }),
       report: (event, trackID, position, paused, keepalive) =>
-        sendInBackground("/playback", { trackID, event, position: Math.max(0, position), paused }, keepalive),
+        reportPlayback({ trackID, event, position: Math.max(0, position), paused }, keepalive),
       probe: streamProblem,
       storage: safeStorage(),
       now: () => Date.now(),

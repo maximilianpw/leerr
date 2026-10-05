@@ -4,8 +4,10 @@ import { scheduleBackups } from "./backups.ts";
 import { deployment, ensureSetupToken } from "./config.ts";
 import { buildApp } from "./http/app.ts";
 import type { Runtime } from "./http/context.ts";
+import { scheduleKeepAlive } from "./keepalive.ts";
 import { logEvent } from "./log.ts";
 import { Store } from "./store.ts";
+import { LiveUpstreams } from "./upstream/index.ts";
 
 /** Below compose's 60 s stop_grace_period, so Leerr exits on its own terms. */
 const SHUTDOWN_DEADLINE = 50_000;
@@ -37,6 +39,7 @@ try {
 const { config, store } = started;
 const setupRequired = store.setupRequired();
 const runtime: Runtime = { startedAt: Date.now(), lastBackup: null };
+const upstream = new LiveUpstreams();
 const { app, reconciler } = await buildApp({
   store,
   origin: config.origin,
@@ -46,10 +49,12 @@ const { app, reconciler } = await buildApp({
   webRoot: fileURLToPath(new URL("../dist/web", import.meta.url)),
   log: logEvent,
   runtime,
+  upstream,
 });
 
 const timer = setInterval(() => void reconciler.run(), 15_000);
 const stopBackups = config.backups ? scheduleBackups(store, config.backups, runtime, logEvent) : () => {};
+const stopKeepAlive = scheduleKeepAlive(store, upstream, logEvent);
 
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const)
@@ -61,6 +66,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
     stopping = true;
     clearInterval(timer);
     stopBackups();
+    stopKeepAlive();
     logEvent("stopping", { signal });
     setTimeout(() => {
       logEvent("stop_timeout", { afterMs: SHUTDOWN_DEADLINE });

@@ -6,15 +6,18 @@ import {
   connectionsSchema,
   lidarrOptionsSchema,
   notifyFormats,
+  plexSectionsSchema,
   request,
   send,
   sessionsSchema,
   statusSchema,
   usersSchema,
   type AdminSettings,
+  type Connections,
   type Probe,
 } from "../api.ts";
 import { useAction, useResource } from "../hooks.ts";
+import { PlexLinkProgress, usePlexLink } from "../plexlink.tsx";
 import { Link } from "../router.tsx";
 import { useSession } from "../session.tsx";
 import { ErrorBox, Field, formatDate, formatRelative, Notice, PasswordDialog, SectionState, Spinner, StatusBadge, Title } from "../ui.tsx";
@@ -109,12 +112,93 @@ function formValues(event: FormEvent<HTMLFormElement>) {
   return (name: string) => String(data.get(name) ?? "");
 }
 
+/**
+ * Signing in happens on Plex's own page; Leerr's server holds the sign-in and
+ * this card follows it until it is approved.
+ */
+function PlexCard({ state, reload }: { state: Connections; reload: () => void }) {
+  const { user, fixturePreview } = useSession();
+  const flow = usePlexLink("leerr.plexLink", reload);
+  const remove = useAction();
+  const linked = state.plex;
+  const begin = () => {
+    if (!fixturePreview) flow.begin("/connections/plex/links");
+  };
+  const disconnect = () => {
+    if (!confirm("Disconnect Plex? Your library, playback and request progress stop until you sign in again.")) return;
+    void remove.run(async () => {
+      await send("/connections/plex", "DELETE");
+      flow.cancel();
+      reload();
+    });
+  };
+  const busy = flow.following || flow.link?.state === "choose_profile";
+  return (
+    <Card
+      title="Plex"
+      description="Your own Plex account: Leerr shows exactly the music it can see, and plays, loves and playlists go to it. You sign in on Plex's page; Leerr never sees your Plex password."
+      badge={
+        linked &&
+        (state.plexValid === false ? (
+          <Warning label="Needs signing in again" />
+        ) : (
+          <Connected label={`Signed in as ${linked.username}${linked.managed ? " (managed profile)" : ""}`} />
+        ))
+      }
+    >
+      {!state.plexConfigured ? (
+        <p>
+          {user.role === "admin" ? (
+            <>
+              First <Link to="/settings/server">set the Plex server address</Link>.
+            </>
+          ) : (
+            "An administrator needs to set up the Plex server first."
+          )}
+        </p>
+      ) : (
+        <>
+          <PlexLinkProgress flow={flow} retry={begin} />
+          {!busy && (
+            <>
+              {state.plexValid === false && linked && (
+                <Notice>
+                  {linked.managed
+                    ? `Plex no longer accepts ${linked.username}'s sign-in. Ask an administrator to link the profile again in Settings → Users.`
+                    : `Plex no longer accepts the saved sign-in for ${linked.username}, for example after it was signed out in Plex. Sign in again.`}
+                </Notice>
+              )}
+              <div className="rowActions start">
+                <button
+                  type="button"
+                  className={linked?.managed ? "secondary" : "primary"}
+                  aria-disabled={flow.starting || fixturePreview}
+                  onClick={begin}
+                >
+                  {flow.starting ? "Opening Plex…" : linked?.managed ? "Sign in with my own Plex account" : linked ? "Sign in again" : "Sign in with Plex"}
+                </button>
+                {linked && (
+                  <button type="button" className="danger" aria-disabled={remove.pending} onClick={() => !remove.pending && disconnect()}>
+                    Disconnect Plex
+                  </button>
+                )}
+              </div>
+              <p className="muted small">
+                Using a managed Plex Home profile (one without its own Plex sign-in)? An administrator links it for you in Settings → Users.
+              </p>
+            </>
+          )}
+        </>
+      )}
+      {remove.error && <ErrorBox message={remove.error} />}
+    </Card>
+  );
+}
+
 function ConnectionsSection() {
   const { user, fixturePreview } = useSession();
   const connections = useResource((signal) => request("/connections", connectionsSchema, { signal }), []);
-  const jellyfin = useAction();
   const lastfm = useAction();
-  const [reconnecting, setReconnecting] = useState(false);
   const state = connections.data;
   if (!state)
     return (
@@ -123,75 +207,26 @@ function ConnectionsSection() {
       </SectionState>
     );
 
-  const save = (action: typeof jellyfin, service: "jellyfin" | "lastfm") => (event: FormEvent<HTMLFormElement>) => {
+  const save = (event: FormEvent<HTMLFormElement>) => {
     const form = event.currentTarget;
     const value = formValues(event);
-    const secret = service === "jellyfin" ? "password" : "apiKey";
-    void action.run(async () => {
-      await send(`/connections/${service}`, "PUT", { username: value("username"), [secret]: value(secret) });
+    void lastfm.run(async () => {
+      await send("/connections/lastfm", "PUT", { username: value("username"), apiKey: value("apiKey") });
       form.reset();
-      setReconnecting(false);
       connections.reload();
     });
   };
-  const disconnect = (action: typeof jellyfin, service: "jellyfin" | "lastfm") => {
-    const consequence =
-      service === "jellyfin" ? "Your library, playback and request progress stop until you connect again." : "Your suggestions stop using your Last.fm listening.";
-    if (!confirm(`Disconnect ${service === "jellyfin" ? "Jellyfin" : "Last.fm"}? ${consequence}`)) return;
-    void action.run(async () => {
-      await send(`/connections/${service}`, "DELETE");
+  const disconnect = () => {
+    if (!confirm("Disconnect Last.fm? Your suggestions stop using your Last.fm listening.")) return;
+    void lastfm.run(async () => {
+      await send("/connections/lastfm", "DELETE");
       connections.reload();
     });
   };
-  const showJellyfinForm = !state.jellyfin || reconnecting || state.jellyfinValid === false;
 
   return (
     <div className="stack">
-      <Card
-        title="Jellyfin"
-        description="Your own Jellyfin account: Leerr shows exactly what it can see. Your password is only used to sign in; Leerr stores the resulting token, encrypted."
-        badge={
-          state.jellyfin &&
-          (state.jellyfinValid === false ? <Warning label="Needs reconnecting" /> : <Connected label={`Connected as ${state.jellyfin}`} />)
-        }
-      >
-        {!state.jellyfinConfigured ? (
-          <p>
-            {user.role === "admin" ? (
-              <>
-                First <Link to="/settings/server">set the Jellyfin server address</Link>.
-              </>
-            ) : (
-              "An administrator needs to set up the Jellyfin server first."
-            )}
-          </p>
-        ) : (
-          <>
-            {state.jellyfinValid === false && (
-              <Notice>Jellyfin no longer accepts the saved sign-in for {state.jellyfin} (for example after a password change). Sign in again below.</Notice>
-            )}
-            {showJellyfinForm ? (
-              <form className="formGrid" onSubmit={save(jellyfin, "jellyfin")}>
-                <fieldset disabled={fixturePreview || jellyfin.pending}>
-                  <Field label="Jellyfin username" name="username" autoComplete="off" defaultValue={state.jellyfin ?? ""} />
-                  <Field label="Jellyfin password" name="password" type="password" autoComplete="off" required={false} />
-                  <button className="primary">{jellyfin.pending ? "Connecting…" : state.jellyfin ? "Reconnect" : "Connect"}</button>
-                </fieldset>
-              </form>
-            ) : (
-              <div className="rowActions start">
-                <button type="button" className="secondary" onClick={() => setReconnecting(true)}>
-                  Reconnect
-                </button>
-                <button type="button" className="danger" disabled={jellyfin.pending} onClick={() => disconnect(jellyfin, "jellyfin")}>
-                  Disconnect Jellyfin
-                </button>
-              </div>
-            )}
-          </>
-        )}
-        {jellyfin.error && <ErrorBox message={jellyfin.error} />}
-      </Card>
+      <PlexCard state={state} reload={connections.reload} />
       <Card
         title="Last.fm"
         description={
@@ -210,11 +245,11 @@ function ConnectionsSection() {
         badge={state.lastfm && <Connected label={`Connected as ${state.lastfm}`} />}
       >
         {state.lastfm ? (
-          <button type="button" className="danger" disabled={lastfm.pending} onClick={() => disconnect(lastfm, "lastfm")}>
+          <button type="button" className="danger" aria-disabled={lastfm.pending} onClick={() => !lastfm.pending && disconnect()}>
             Disconnect Last.fm
           </button>
         ) : (
-          <form className="formGrid" onSubmit={save(lastfm, "lastfm")}>
+          <form className="formGrid" onSubmit={save}>
             <fieldset disabled={fixturePreview || lastfm.pending}>
               <Field label="Last.fm username" name="username" autoComplete="off" />
               <Field
@@ -321,7 +356,7 @@ function ServerSection() {
   return (
     <fieldset className="stack plain" disabled={fixturePreview}>
       {fixturePreview && <Notice>The demo's server settings are read-only.</Notice>}
-      <JellyfinServer settings={settings.data} saved={settings.reload} />
+      <PlexServer settings={settings.data} saved={settings.reload} />
       <LidarrServer settings={settings.data} saved={settings.reload} notice={lidarrNotice} setNotice={setLidarrNotice} />
       <LastfmServer settings={settings.data} saved={settings.reload} />
       <NotificationsServer settings={settings.data} saved={settings.reload} />
@@ -329,39 +364,95 @@ function ServerSection() {
   );
 }
 
-function JellyfinServer({ settings, saved }: { settings: AdminSettings; saved: () => void }) {
+function PlexServer({ settings, saved }: { settings: AdminSettings; saved: () => void }) {
   const action = useAction();
+  const section = useAction();
   const [done, setDone] = useState(false);
+  const sections = useResource(
+    (signal) => (settings.plexURL ? request("/admin/plex/sections", plexSectionsSchema, { signal }) : Promise.resolve(null)),
+    [settings.plexURL],
+  );
   const submit = (event: FormEvent<HTMLFormElement>) => {
     const value = formValues(event);
     const url = value("url").trim();
-    if (settings.jellyfinURL && url !== settings.jellyfinURL && !confirm("Changing the Jellyfin server disconnects every user's Jellyfin account. Continue?"))
+    if (
+      settings.plexURL &&
+      url !== settings.plexURL &&
+      !confirm(
+        url
+          ? "If this address is a different Plex server, everyone's Plex sign-in is removed and they sign in again. Continue?"
+          : "Switch Plex off for everyone? Libraries and playback stop until the address is saved again; everyone's Plex sign-in is kept.",
+      )
+    )
       return;
     setDone(false);
     void action.run(async () => {
-      await send("/admin/settings/jellyfin", "PUT", { url });
+      await send("/admin/settings/plex", "PUT", { url });
       setDone(true);
       saved();
     });
   };
+  // A library re-created in Plex gets a new key: the saved one then matches no option.
+  const missingSection =
+    settings.plexSection && sections.data && !sections.data.items.some((item) => item.key === settings.plexSection) ? settings.plexSection : null;
+  const choose = (key: string) =>
+    void section.run(async () => {
+      await send("/admin/settings/plex/section", "PUT", { key: key || null });
+      saved();
+    });
   return (
     <Card
-      title="Jellyfin server"
-      description="The HTTPS address of your Jellyfin server. Each person then connects their own account under Connections."
-      badge={settings.jellyfinURL && <Connected label="Configured" />}
+      title="Plex server"
+      description="The HTTPS address of your Plex Media Server. Each person then signs in with their own Plex account under Connections."
+      badge={settings.plexURL && <Connected label="Configured" />}
     >
       <form className="formGrid" onSubmit={submit}>
-        <Field label="Server address" name="url" type="url" placeholder="https://jellyfin.example.com" defaultValue={settings.jellyfinURL ?? ""} required={false} />
-        <button className="primary" disabled={action.pending}>
-          {action.pending ? "Saving…" : "Save"}
+        <Field
+          label="Server address"
+          name="url"
+          type="url"
+          placeholder="https://192-168-1-10.<id>.plex.direct:32400"
+          defaultValue={settings.plexURL ?? ""}
+          required={false}
+          hint="HTTPS only: the server's plex.direct address or a reverse proxy. The deployment guide shows how to find it."
+        />
+        <button className="primary" aria-disabled={action.pending}>
+          {action.pending ? "Checking Plex…" : "Save"}
         </button>
       </form>
       {done && !action.error && (
         <Notice>
-          Saved. Now <Link to="/settings">connect your Jellyfin account</Link>.
+          Saved. Now <Link to="/settings">sign in with your Plex account</Link>.
         </Notice>
       )}
       {action.error && <ErrorBox message={action.error} />}
+      {settings.plexURL &&
+        (sections.code === "plex_not_connected" ? (
+          <p className="muted small">
+            <Link to="/settings">Sign in with Plex</Link> to choose which music library Leerr uses.
+          </p>
+        ) : sections.error ? (
+          <ErrorBox message={sections.error} retry={sections.reload} />
+        ) : sections.data ? (
+          <label className="field">
+            <span>Music library</span>
+            <select value={settings.plexSection ?? ""} onChange={(event) => choose(event.currentTarget.value)} aria-busy={section.pending}>
+              <option value="">Automatic: the Plex Music library</option>
+              {missingSection && <option value={missingSection}>Library {missingSection} (no longer in Plex)</option>}
+              {sections.data.items.map((item) => (
+                <option key={item.key} value={item.key}>
+                  {item.title}
+                  {item.agent === "tv.plex.agents.music" ? "" : " (not matched by Plex Music: requests cannot be recognised)"}
+                </option>
+              ))}
+            </select>
+            <small>Albums arrive in this library; Leerr matches them to requests by their MusicBrainz release.</small>
+            {missingSection && (
+              <ErrorBox message="The music library chosen here is no longer on the Plex server (a re-created library gets a new number), so libraries and requests fail. Choose another, or Automatic." />
+            )}
+          </label>
+        ) : null)}
+      {section.error && <ErrorBox message={section.error} />}
     </Card>
   );
 }
@@ -639,13 +730,48 @@ function NotificationsServer({ settings, saved }: { settings: AdminSettings; sav
   );
 }
 
+/** Whom this tab is linking a Plex profile for, across Plex's round trip. */
+const LINK_TARGET = "leerr.plexProfileFor";
+function readLinkTarget(): string {
+  try {
+    return sessionStorage.getItem(LINK_TARGET) ?? "";
+  } catch {
+    return "";
+  }
+}
+function saveLinkTarget(username: string) {
+  try {
+    sessionStorage.setItem(LINK_TARGET, username);
+  } catch {
+    // Only the "for whom" label is lost.
+  }
+}
+
 function UsersSection() {
-  const { user: me, refresh } = useSession();
+  const { user: me, refresh, fixturePreview } = useSession();
   const users = useResource((signal) => request("/admin/users", usersSchema, { signal }), []);
   const add = useAction();
   const update = useAction();
   const [added, setAdded] = useState("");
   const [resetting, setResetting] = useState<{ id: string; username: string } | null>(null);
+  // Linking a managed Plex Home profile for someone, from the administrator's own device.
+  const profileLink = usePlexLink("leerr.plexProfileLink", users.reload);
+  const [linkingFor, setLinkingFor] = useState(() => readLinkTarget());
+  const linkProfile = (id: string, username: string) => {
+    if (profileLink.starting || fixturePreview) return;
+    saveLinkTarget(username);
+    setLinkingFor(username);
+    profileLink.begin(`/admin/users/${encodeURIComponent(id)}/plex/links`);
+  };
+  const unlink = (id: string, username: string, plexName: string) => {
+    if (update.pending) return;
+    if (!confirm(`Unlink ${username} from ${plexName} in Plex? Their library and playback stop until a Plex account or profile is linked again.`))
+      return;
+    void update.run(async () => {
+      await send(`/admin/users/${encodeURIComponent(id)}/plex`, "DELETE");
+      users.reload();
+    });
+  };
 
   const create = (event: FormEvent<HTMLFormElement>) => {
     const form = event.currentTarget;
@@ -680,8 +806,21 @@ function UsersSection() {
 
   return (
     <div className="stack">
-      <Card title="People" description="Everyone gets their own requests and connects their own Jellyfin account.">
+      <Card title="People" description="Everyone gets their own requests and signs in with their own Plex account.">
         {update.error && <ErrorBox message={update.error} />}
+        {(profileLink.following || profileLink.link || profileLink.error) && (
+          <div className="stack">
+            {linkingFor && <p className="muted small">Linking a Plex Home profile for {linkingFor}.</p>}
+            <PlexLinkProgress
+              flow={profileLink}
+              forOther={linkingFor || "this person"}
+              retry={() => {
+                const target = users.data?.items.find((entry) => entry.username === linkingFor);
+                if (target) linkProfile(target.id, target.username);
+              }}
+            />
+          </div>
+        )}
         <SectionState loading={users.loading} error={users.error} empty={!users.data?.items.length} retry={users.reload} emptyText="No users.">
           <ul className="rows">
             {users.data?.items.map((user) => (
@@ -698,8 +837,31 @@ function UsersSection() {
                     {user.role === "admin" ? "Administrator" : "Member"} · joined {formatDate(user.createdAt)}
                     {user.disabled ? " · disabled" : ""}
                   </small>
+                  <small>
+                    {user.plex ? `Plays as ${user.plex.username} in Plex${user.plex.managed ? " (managed profile)" : ""}` : "Not signed in to Plex"}
+                  </small>
                 </span>
                 <div className="rowActions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    aria-disabled={profileLink.starting || fixturePreview}
+                    onClick={() => linkProfile(user.id, user.username)}
+                    aria-label={`Link a Plex Home profile for ${user.username}`}
+                  >
+                    Link Plex profile
+                  </button>
+                  {user.plex && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      aria-disabled={update.pending || fixturePreview}
+                      onClick={() => !fixturePreview && user.plex && unlink(user.id, user.username, user.plex.username)}
+                      aria-label={`Unlink ${user.username} from Plex`}
+                    >
+                      Unlink Plex
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="secondary"
@@ -867,7 +1029,7 @@ function StatusSection() {
         <SectionState loading={status.loading} error={status.error} empty={!data} retry={status.reload} stale emptyText="">
           {data && (
             <ul className="rows">
-              <ProbeRow name="Jellyfin" probe={data.jellyfin} />
+              <ProbeRow name="Plex" probe={data.plex} />
               <ProbeRow name="Lidarr" probe={data.lidarr} />
               {data.lidarr.state === "ok" && !data.lidarrReady && (
                 <li>

@@ -46,7 +46,7 @@ export function AuthPage({
           <br />
           Play them.
         </h2>
-        <p>Discover music, request it for your Jellyfin library, and listen anywhere.</p>
+        <p>Discover music, request it for your Plex library, and listen anywhere.</p>
       </section>
       <main className="authCard">
         <Brand />

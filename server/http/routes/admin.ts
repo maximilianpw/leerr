@@ -1,12 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { hashPassword } from "../../passwords.ts";
-import { lidarrReady, notifyFormats, roles } from "../../store.ts";
+import { lidarrReady, notifyFormats, plexSecret, roles } from "../../store.ts";
 import { UpstreamError, validateEndpoint } from "../../upstream/index.ts";
-import { lidarrAccess, password, revokeUser, username, type AppContext } from "../context.ts";
+import { hasPlex, lidarrAccess, password, revokeUser, username, withPlex, type AppContext } from "../context.ts";
 import { APIError, notFound } from "../errors.ts";
 
-/** Upstream probes are cached briefly so the status page cannot hammer Jellyfin or Lidarr. */
+/** Upstream probes are cached briefly so the status page cannot hammer Plex or Lidarr. */
 const PROBE_TTL = 10_000;
 type Probe = { state: "ok" | "error" | "unconfigured"; message: string; version: string | null; latencyMs: number | null };
 
@@ -19,13 +19,18 @@ export function adminRoutes(app: FastifyInstance, context: AppContext) {
   app.get("/api/v1/admin/users", async (request) => {
     auth.require(request, true);
     return {
-      items: store.users().map((user) => ({
-        id: user.id,
-        username: user.username,
-        role: user.role,
-        disabled: user.disabled,
-        createdAt: new Date(user.createdAt).toISOString(),
-      })),
+      items: store.users().map((user) => {
+        // Which Plex account each person plays as, so a link to the wrong account is noticed.
+        const link = store.secret(user.id, "plex", plexSecret);
+        return {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          disabled: user.disabled,
+          createdAt: new Date(user.createdAt).toISOString(),
+          plex: link ? { username: link.username, managed: link.managed } : null,
+        };
+      }),
     };
   });
 
@@ -80,7 +85,8 @@ export function adminRoutes(app: FastifyInstance, context: AppContext) {
     auth.require(request, true);
     const settings = store.settings();
     return {
-      jellyfinURL: settings.jellyfinURL,
+      plexURL: settings.plexURL,
+      plexSection: settings.plexSection,
       lidarrURL: settings.lidarrURL,
       lidarrConfigured: !!settings.lidarrURL && !!settings.lidarrKey,
       lidarrReady: lidarrReady(settings),
@@ -95,22 +101,55 @@ export function adminRoutes(app: FastifyInstance, context: AppContext) {
     };
   });
 
-  app.put("/api/v1/admin/settings/jellyfin", async (request) => {
+  app.put("/api/v1/admin/settings/plex", async (request) => {
     const actor = auth.require(request, true);
     if (context.fixturePreview) throw fixtureRefusal();
     const body = z.object({ url: z.string().max(2000) }).parse(request.body);
     const url = body.url.trim() ? validateEndpoint(body.url) : null;
+    // The address must answer as a claimed server: its identity decides which tokens may go there.
+    const identity = url ? await context.upstream.plexIdentity(url) : null;
+    if (identity && !identity.claimed)
+      throw new APIError(
+        409,
+        "plex_unclaimed",
+        "This Plex server is not signed in to a Plex account, so nobody can sign in to it through Plex. Claim it in Plex Web first.",
+      );
+    auth.require(request, true);
     const previous = store.settings();
-    if (url === previous.jellyfinURL) return {};
+    // Clearing the address only switches Plex off: the pinned server, and with it everyone's link, stays.
+    const machineID = identity ? identity.machineID : previous.plexMachineID;
+    if (url === previous.plexURL && machineID === previous.plexMachineID) return {};
+    const moved = machineID !== previous.plexMachineID;
     store.transaction(() => {
-      // Tokens belong to the old installation and must never be sent to a new host.
-      store.deleteServiceSecrets("jellyfin");
-      store.deleteAllTickets();
-      store.saveSettings({ ...previous, jellyfinURL: url });
+      // Tokens belong to the old server and must never be sent to another one.
+      if (moved) {
+        store.deleteServiceSecrets("plex");
+        store.deleteAllTickets();
+      }
+      store.saveSettings({ ...previous, plexURL: url, plexMachineID: machineID, plexSection: moved ? null : previous.plexSection });
     });
-    context.streams.abortAll();
+    if (moved || !url) context.streams.abortAll();
+    if (moved) context.plexRenewals.clear();
     context.library.invalidate();
-    log("settings_jellyfin", { actor: actor.user.id, configured: !!url });
+    log("settings_plex", { actor: actor.user.id, configured: !!url, moved });
+    return {};
+  });
+
+  // The music libraries the administrator's own Plex sign-in can see, to pick the one Leerr uses.
+  app.get("/api/v1/admin/plex/sections", async (request) => {
+    const actor = auth.require(request, true);
+    if (!hasPlex(context, actor.user.id))
+      throw new APIError(409, "plex_not_connected", "Sign in to Plex in Settings → Connections first, to see the server's libraries.");
+    const items = await withPlex(context, actor.user.id, (access) => context.upstream.plexSections(access));
+    return { items, selected: store.settings().plexSection };
+  });
+
+  app.put("/api/v1/admin/settings/plex/section", async (request) => {
+    const actor = auth.require(request, true);
+    const { key } = z.object({ key: z.string().regex(/^\d{1,12}$/).nullable() }).parse(request.body);
+    store.saveSettings({ ...store.settings(), plexSection: key });
+    context.library.invalidate();
+    log("settings_plex_section", { actor: actor.user.id, chosen: key !== null });
     return {};
   });
 
@@ -256,10 +295,19 @@ export function adminRoutes(app: FastifyInstance, context: AppContext) {
   app.get("/api/v1/admin/status", async (request) => {
     auth.require(request, true);
     const settings = store.settings();
-    const [jellyfin, lidarr] = await Promise.all([
-      probe(`jellyfin:${settings.jellyfinURL}`, !!settings.jellyfinURL, () =>
-        context.upstream.jellyfinVersion(settings.jellyfinURL ?? ""),
-      ),
+    const [plex, lidarr] = await Promise.all([
+      probe(`plex:${settings.plexURL}`, !!settings.plexURL, async () => {
+        const identity = await context.upstream.plexIdentity(settings.plexURL ?? "");
+        // Tokens are only sent to the server the address answered as when it was saved.
+        if (identity.machineID !== settings.plexMachineID)
+          throw new UpstreamError(
+            "upstream_rejected",
+            409,
+            "A different Plex server now answers at this address. Leerr sends nobody's sign-in there until the address is saved again.",
+            "not_applied",
+          );
+        return identity.version;
+      }),
       probe(`lidarr:${settings.lidarrURL}`, !!settings.lidarrURL && !!settings.lidarrKey, () =>
         context.upstream.lidarrVersion({ endpoint: settings.lidarrURL ?? "", key: settings.lidarrKey }),
       ),
@@ -267,7 +315,7 @@ export function adminRoutes(app: FastifyInstance, context: AppContext) {
     const worker = context.reconciler.status();
     const iso = (value: number | null) => (value === null ? null : new Date(value).toISOString());
     return {
-      jellyfin,
+      plex,
       lidarr,
       lidarrReady: lidarrReady(settings),
       worker: {

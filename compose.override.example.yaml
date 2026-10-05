@@ -7,8 +7,12 @@ services:
       LEERR_BACKUP_DIR: /backups
       LEERR_BACKUP_HOURS: "24"
       LEERR_BACKUP_KEEP: "7"
-      # Trust a private CA (or a self-signed certificate) for Jellyfin or Lidarr.
+      # Trust a private CA (or a self-signed certificate) for Plex or Lidarr.
       NODE_EXTRA_CA_CERTS: /etc/leerr/ca.pem
     volumes:
       - ./backups:/backups
       - ./home-ca.pem:/etc/leerr/ca.pem:ro
+    # Pin Plex's plex.direct name (here the compose gateway, Plex on this machine)
+    # so playback does not depend on public DNS. Put in your certificate id.
+    # extra_hosts:
+    #   - "10-213-47-1.<certificate id>.plex.direct:10.213.47.1"

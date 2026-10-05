@@ -96,7 +96,7 @@ export type Attempt = { failed: () => void; release: () => void };
 
 /**
  * Failed-attempt throttle per key (an account, a known device, a member's
- * Jellyfin sign-ins), complementing the per-IP rate limit. `limit` failures
+ * password checks), complementing the per-IP rate limit. `limit` failures
  * within `window` of the first lock the key for a full `window`. Attempts
  * still being checked count against the limit, so a burst of concurrent
  * guesses cannot slip past it.

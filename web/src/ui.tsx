@@ -267,7 +267,7 @@ const stages: RequestStatus[] = ["requested", "acquiring", "imported", "availabl
 export const statusDescriptions: Record<RequestStatus, string> = {
   requested: "Queued for Lidarr",
   acquiring: "Lidarr is searching or downloading",
-  imported: "In Lidarr; appears after Jellyfin scans",
+  imported: "In Lidarr; appears after Plex scans",
   available: "Ready to play",
   failed: "Failed",
   attention: "Needs attention",

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { jellyfinSecret, lastfmSecret } from "../store.ts";
-import { fixtureAlbum, identities } from "../testing.ts";
-import { UpstreamError } from "../upstream/index.ts";
-import { jellyfinDeviceID } from "../http/context.ts";
-import { harness } from "./harness.ts";
+import { lastfmSecret, plexSecret } from "../store.ts";
+import { fixtureAlbum, identities, PLEX_MACHINE, plexIDs, plexLinkFor } from "../testing.ts";
+import { PartialReleaseLookup, UpstreamError } from "../upstream/index.ts";
+import { harness, ORIGIN, type Client } from "./harness.ts";
 
 const requestBody = (identity: typeof identities.album) => ({
   releaseGroupMBID: identity.releaseGroupMBID,
@@ -12,104 +11,314 @@ const requestBody = (identity: typeof identities.album) => ({
   artistMBID: identity.artistMBID,
 });
 
-test("connections are per user, validated upstream, encrypted at rest and removable", async (t) => {
+/** Signs `client` in to Plex the way the browser does: start, approve on "plex.tv", then poll. */
+async function linkPlex(h: Awaited<ReturnType<typeof harness>>, client: Client, accountToken: string) {
+  const started = await h.call("POST", "/api/v1/connections/plex/links", client, {});
+  assert.equal(started.status, 200, started.body);
+  const { id, authURL } = started.json();
+  h.upstream.approvePin(accountToken);
+  h.clock.advance(3_000);
+  return { id, authURL, result: (await h.call("GET", `/api/v1/connections/plex/links/${id}`, client)).json() };
+}
+
+test("people link their own Plex account through Plex's sign-in page; only server-bound tokens are kept, encrypted", async (t) => {
   const h = await harness(t);
   const alice = await h.user("alice");
   const bob = await h.user("bob");
-  const missing = await h.call("PUT", "/api/v1/connections/jellyfin", alice, { username: "admin", password: "jelly-password" });
-  assert.equal(missing.json().error.code, "jellyfin_not_configured");
+  const missing = await h.call("POST", "/api/v1/connections/plex/links", alice, {});
+  assert.equal(missing.json().error.code, "plex_not_configured");
   h.configure();
-  const wrong = await h.call("PUT", "/api/v1/connections/jellyfin", alice, { username: "admin", password: "nope" });
-  assert.equal(wrong.json().error.code, "upstream_auth");
-  assert.equal(
-    (await h.call("PUT", "/api/v1/connections/jellyfin", alice, { username: "admin", password: "jelly-password" })).status,
-    200,
-  );
-  assert.equal(
-    (await h.call("PUT", "/api/v1/connections/lastfm", alice, { username: "alice-fm", apiKey: "bad" })).json().error.code,
-    "upstream_auth",
-  );
+  const started = (await h.call("POST", "/api/v1/connections/plex/links", alice, {})).json();
+  assert.match(started.id, /^[A-Za-z0-9_-]{43}$/);
+  const auth = new URL(started.authURL);
+  assert.equal(auth.origin, "https://app.plex.tv");
+  const fragment = new URLSearchParams(auth.hash.slice(2));
+  assert.equal(fragment.get("clientID"), h.store.plexClientID(alice.userID));
+  assert.match(fragment.get("clientID") ?? "", /^leerr-[0-9a-f]{32}$/);
+  assert.equal(fragment.get("forwardUrl"), `${ORIGIN}/settings/connections?plexLink=${started.id}`);
+  assert.equal(fragment.get("context[device][deviceName]"), "Leerr (alice)");
+  // Not approved yet: Leerr keeps waiting, and asks plex.tv at most every two seconds.
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, alice)).json().state, "waiting");
+  h.upstream.approvePin("admin-account");
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, alice)).json().state, "waiting", "checked too soon");
+  h.clock.advance(3_000);
+  const linked = (await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, alice)).json();
+  assert.deepEqual([linked.state, linked.username], ["linked", "admin"]);
+  // Nobody else can read or finish another person's sign-in.
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, bob)).status, 404);
   assert.equal(
     (await h.call("PUT", "/api/v1/connections/lastfm", alice, { username: "alice-fm", apiKey: "lastfm-key" })).status,
     200,
   );
   assert.deepEqual((await h.call("GET", "/api/v1/connections", alice)).json(), {
-    jellyfinConfigured: true,
-    jellyfin: "admin",
-    jellyfinValid: true,
+    plexConfigured: true,
+    plex: { username: "admin", managed: false },
+    plexValid: true,
     lastfm: "alice-fm",
     lastfmKeyProvided: false,
     lidarrConfigured: true,
     lidarrReady: true,
   });
-  assert.equal((await h.call("GET", "/api/v1/connections", bob)).json().jellyfin, null);
+  assert.equal((await h.call("GET", "/api/v1/connections", bob)).json().plex, null);
+  const saved = h.store.secret(alice.userID, "plex", plexSecret);
+  assert.deepEqual([saved?.serverToken, saved?.machineID], ["admin-plex-token", PLEX_MACHINE]);
   const raw = JSON.stringify(h.store.db.prepare("SELECT value FROM secrets").all());
-  assert.equal(raw.includes("admin-jelly-token"), false);
+  assert.equal(raw.includes("admin-plex-token") || raw.includes("admin-account"), false);
   assert.equal(raw.includes("lastfm-key"), false);
   assert.equal((await h.call("DELETE", "/api/v1/connections/lastfm", alice)).status, 200);
   assert.equal(h.store.secret(alice.userID, "lastfm", lastfmSecret), null);
-  assert.ok(h.store.secret(alice.userID, "jellyfin", jellyfinSecret));
+  // Disconnecting forgets the link and signs it out on plex.tv.
+  assert.equal((await h.call("DELETE", "/api/v1/connections/plex", alice)).status, 200);
+  assert.equal(h.store.secret(alice.userID, "plex", plexSecret), null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.upstream.signOuts, ["admin-account"]);
 });
 
-test("each Leerr user signs in to Jellyfin as their own device, so sharing an account revokes nobody", async (t) => {
+test("each Leerr user has their own random Plex client identifier, which plex.tv ties the sign-in to", async (t) => {
   const h = await harness(t);
   h.configure();
   const alice = await h.user("alice");
   const bob = await h.user("bob");
-  for (const client of [alice, bob])
-    await h.call("PUT", "/api/v1/connections/jellyfin", client, { username: "admin", password: "jelly-password" });
-  assert.deepEqual(h.upstream.loginDevices, [jellyfinDeviceID(alice.userID), jellyfinDeviceID(bob.userID)]);
-  assert.notEqual(h.upstream.loginDevices[0], h.upstream.loginDevices[1]);
-  assert.match(h.upstream.loginDevices[0], /^leerr-[0-9a-f]{32}$/);
-  assert.equal(h.upstream.loginDevices[0].includes(alice.userID), false, "the device id does not reveal the user id");
+  const aliceID = h.store.plexClientID(alice.userID);
+  assert.equal(h.store.plexClientID(alice.userID), aliceID, "stable");
+  assert.notEqual(h.store.plexClientID(bob.userID), aliceID);
+  assert.equal(aliceID.includes(alice.userID), false, "the identifier does not reveal the user id");
+  const { result } = await linkPlex(h, alice, "member-account");
+  assert.equal(result.state, "linked");
+  // plex.tv only gives the token to the identifier that created the PIN.
+  const started = (await h.call("POST", "/api/v1/connections/plex/links", bob, {})).json();
+  const pin = [...h.upstream.pins.values()].at(-1);
+  assert.ok(pin);
+  pin.clientID = aliceID;
+  pin.token = "admin-account";
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, bob)).json().state, "waiting");
 });
 
-test("the Jellyfin connect limit says how long its window really is", async (t) => {
+test("a Plex account the server is not shared with is not linked, and an expired sign-in says so", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const alice = await h.user("alice");
+  assert.equal((await linkPlex(h, alice, "stranger-account")).result.state, "no_access");
+  assert.equal(h.store.secret(alice.userID, "plex", plexSecret), null);
+  const started = (await h.call("POST", "/api/v1/connections/plex/links", alice, {})).json();
+  const pin = [...h.upstream.pins.values()].at(-1);
+  assert.ok(pin);
+  pin.expired = true;
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, alice)).json().state, "expired");
+  // A new sign-in replaces the old one.
+  const next = (await h.call("POST", "/api/v1/connections/plex/links", alice, {})).json();
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, alice)).status, 404);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${next.id}`, alice)).json().state, "waiting");
+});
+
+test("a full Home member links a managed profile; Leerr keeps only the profile's own sign-in", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin");
+  const kid = await h.user("kid");
+  const { id } = (await h.call("POST", `/api/v1/admin/users/${kid.userID}/plex/links`, admin, {})).json();
+  h.upstream.approvePin("admin-account");
+  h.clock.advance(3_000);
+  const result = (await h.call("GET", `/api/v1/connections/plex/links/${id}`, admin)).json();
+  assert.equal(result.state, "choose_profile");
+  assert.deepEqual(result.profiles, [{ uuid: "kid-uuid", name: "Kid", protected: true }]);
+  assert.equal(h.store.secret(kid.userID, "plex", plexSecret), null, "nothing is stored before a profile is chosen");
+  const pick = (body: { uuid: string; pin?: string }) => h.call("POST", `/api/v1/connections/plex/links/${id}/profile`, admin, body);
+  assert.equal((await pick({ uuid: "admin-uuid" })).status, 400, "only listed managed profiles");
+  assert.equal((await pick({ uuid: "kid-uuid", pin: "0000" })).status, 403);
+  // plex.tv failing after the switch leaves the choice open, to try again.
+  h.upstream.failServerToken = new UpstreamError("upstream_unavailable", 503, "plex.tv returned HTTP 503.");
+  assert.equal((await pick({ uuid: "kid-uuid", pin: "1234" })).status, 503);
+  h.upstream.failServerToken = null;
+  const chosen = await pick({ uuid: "kid-uuid", pin: "1234" });
+  assert.equal(chosen.json().state, "linked");
+  const saved = h.store.secret(kid.userID, "plex", plexSecret);
+  assert.deepEqual([saved?.accountToken, saved?.serverToken, saved?.managed, saved?.username], ["kid-account", "kid-plex-token", true, "Kid"]);
+  assert.equal(JSON.stringify(saved).includes("admin-account"), false, "the member's own token is not kept");
+  assert.deepEqual((await h.call("GET", "/api/v1/connections", kid)).json().plex, { username: "Kid", managed: true });
+});
+
+test("starting Plex sign-ins is limited per person", async (t) => {
   const h = await harness(t);
   h.configure();
   const alice = await h.user("alice");
   for (let index = 0; index < 10; index++)
-    assert.equal((await h.call("PUT", "/api/v1/connections/jellyfin", alice, { username: "admin", password: "jelly-password" })).status, 200);
-  const limited = await h.call("PUT", "/api/v1/connections/jellyfin", alice, { username: "admin", password: "jelly-password" });
+    assert.equal((await h.call("POST", "/api/v1/connections/plex/links", alice, {})).status, 200);
+  const limited = await h.call("POST", "/api/v1/connections/plex/links", alice, {});
   assert.equal(limited.status, 429);
   assert.equal(limited.json().error.message, "Too many requests. Try again in 15 minutes.");
 });
 
-test("members cannot use Leerr to guess Jellyfin passwords", async (t) => {
-  const h = await harness(t);
-  h.configure();
-  const mallory = await h.user("mallory");
-  const attempt = (username: string) =>
-    h.call("PUT", "/api/v1/connections/jellyfin", mallory, { username, password: "guess" });
-  for (let index = 0; index < 5; index++) assert.equal((await attempt(index % 2 ? "admin" : "member")).status, 502);
-  const locked = await attempt("admin");
-  assert.equal(locked.status, 429);
-  assert.equal(locked.json().error.code, "login_locked");
-  assert.ok(h.events.some((entry) => entry.event === "connection_failed" && entry.fields.user === mallory.userID));
-  // An unreachable Jellyfin is not a guess.
-  const h2 = await harness(t);
-  h2.configure();
-  const member = await h2.user("member");
-  h2.upstream.jellyfinLogin = async () => {
-    throw new UpstreamError("upstream_unavailable", 503, "Jellyfin could not be reached (ECONNREFUSED).", "not_applied");
-  };
-  for (let index = 0; index < 6; index++)
-    assert.equal((await h2.call("PUT", "/api/v1/connections/jellyfin", member, { username: "x", password: "y" })).status, 503);
-});
-
-test("a revoked Jellyfin sign-in says to reconnect, without signing the person out of Leerr", async (t) => {
+test("a Plex server token that stops working is fetched again once before the person is asked to sign in again", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  h.upstream.revokedTokens.add("admin-jelly-token");
+  // The share was re-created: plex.tv hands out a new server token.
+  h.upstream.revokedTokens.add("admin-plex-token");
+  const entry = h.upstream.accounts.get("admin-account");
+  assert.ok(entry);
+  entry.serverToken = "admin-plex-token-2";
+  h.upstream.libraries.set("admin-plex-token-2", h.upstream.libraries.get("admin-plex-token") ?? []);
+  assert.equal((await h.call("GET", "/api/v1/library", admin)).status, 200);
+  assert.equal(h.store.secret(admin.userID, "plex", plexSecret)?.serverToken, "admin-plex-token-2");
+  // Really gone: the person is told to sign in again, and stays signed in to Leerr.
+  h.upstream.revokedTokens.add("admin-plex-token-2");
+  entry.serverToken = null;
+  h.clock.advance(6 * 60_000);
   const library = await h.call("GET", "/api/v1/library", admin);
   assert.equal(library.status, 409);
-  assert.equal(library.json().error.code, "jellyfin_reconnect");
-  assert.equal((await h.call("GET", "/api/v1/connections", admin)).json().jellyfinValid, false);
+  assert.equal(library.json().error.code, "plex_reconnect");
+  assert.equal((await h.call("GET", "/api/v1/connections", admin)).json().plexValid, false);
   assert.equal((await h.call("GET", "/api/v1/me", admin)).status, 200);
   // Requests still work: the library check is best effort.
   assert.equal((await h.call("POST", "/api/v1/requests", admin, requestBody(identities.other))).status, 200);
   assert.equal((await h.call("GET", "/api/v1/requests", admin)).json().libraryChecked, false);
+});
+
+test("nobody's token goes to the saved address unless it proves to be the saved Plex server", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  assert.equal((await h.call("GET", "/api/v1/library", admin)).status, 200);
+  h.upstream.machineID = "someone-elses-server";
+  h.clock.advance(11 * 60_000);
+  const library = await h.call("GET", "/api/v1/library", admin);
+  assert.equal(library.json().error.code, "plex_wrong_server");
+  assert.equal(h.upstream.libraryCalls, 1, "the second listing never reached Plex");
+  // Requests, search and Settings keep working without the library meanwhile.
+  assert.equal((await h.call("GET", "/api/v1/requests", admin)).json().libraryChecked, false);
+  assert.equal((await h.call("GET", "/api/v1/discover/search?q=x", admin)).status, 200);
+  assert.equal((await h.call("POST", "/api/v1/requests", admin, requestBody(identities.other))).status, 200);
+  assert.equal((await h.call("GET", "/api/v1/connections", admin)).json().plexValid, null);
+  const status = (await h.call("GET", "/api/v1/admin/status", admin)).json();
+  assert.equal(status.plex.state, "error");
+  assert.match(status.plex.message, /different Plex server/);
+  // An address that answers with something other than Plex's identity gets no token either.
+  h.upstream.machineID = PLEX_MACHINE;
+  for (const failure of [
+    new UpstreamError("upstream_rejected", 502, "Plex rejected the request (HTTP 404).", "not_applied"),
+    new UpstreamError("upstream_protocol", 502, "Plex did not return valid JSON."),
+  ]) {
+    h.upstream.failIdentity = failure;
+    assert.notEqual((await h.call("GET", "/api/v1/library", admin)).status, 200);
+    assert.equal(h.upstream.libraryCalls, 1);
+  }
+});
+
+test("a renewed Plex server token is shared by everyone waiting for it, and works for the library at once", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  const entry = h.upstream.accounts.get("admin-account");
+  assert.ok(entry);
+  h.upstream.revokedTokens.add("admin-plex-token");
+  entry.serverToken = "admin-plex-token-2";
+  h.upstream.libraries.set("admin-plex-token-2", h.upstream.libraries.get("admin-plex-token") ?? []);
+  const statuses = await Promise.all(
+    ["/api/v1/library", "/api/v1/library/artists", "/api/v1/playlists"].map(async (url) => (await h.call("GET", url, admin)).status),
+  );
+  assert.deepEqual(statuses, [200, 200, 200]);
+  assert.equal(h.upstream.serverTokenCalls, 1, "one plex.tv call for all three");
+  // The library summary walks with the new token, rather than a cached failure.
+  assert.equal((await h.call("GET", "/api/v1/requests", admin)).json().libraryChecked, true);
+  assert.equal((await h.call("GET", "/api/v1/discover/recommendations", admin)).status, 200);
+  // The Connections check renews too, instead of telling the person to sign in again.
+  h.upstream.revokedTokens.add("admin-plex-token-2");
+  entry.serverToken = "admin-plex-token-3";
+  h.upstream.libraries.set("admin-plex-token-3", h.upstream.libraries.get("admin-plex-token") ?? []);
+  h.clock.advance(6 * 60_000);
+  assert.equal((await h.call("GET", "/api/v1/connections", admin)).json().plexValid, true);
+  // plex.tv being down is an outage, not a reason to sign in again.
+  h.upstream.revokedTokens.add("admin-plex-token-3");
+  h.upstream.failServerToken = new UpstreamError("upstream_unavailable", 503, "plex.tv returned HTTP 503.");
+  h.clock.advance(6 * 60_000);
+  const outage = await h.call("GET", "/api/v1/library", admin);
+  assert.equal(outage.json().error.code, "upstream_unavailable");
+});
+
+test("one Plex account belongs to one Leerr user", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const owner = await h.user("owner");
+  const child = await h.user("child");
+  assert.equal((await linkPlex(h, owner, "admin-account")).result.state, "linked");
+  // E.g. the owner approving a sign-in on a child's device by mistake.
+  const { result } = await linkPlex(h, child, "admin-account");
+  assert.deepEqual([result.state, result.mode], ["in_use", "own"]);
+  assert.equal(h.store.secret(child.userID, "plex", plexSecret), null);
+  // The owner signing in again on their own account is fine.
+  assert.equal((await linkPlex(h, owner, "admin-account")).result.state, "linked");
+});
+
+test("an administrator links a managed Home profile for someone from their own device", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin");
+  const kid = await h.user("kid");
+  assert.equal((await h.call("POST", `/api/v1/admin/users/${kid.userID}/plex/links`, kid, {})).status, 403);
+  const started = (await h.call("POST", `/api/v1/admin/users/${kid.userID}/plex/links`, admin, {})).json();
+  const fragment = new URLSearchParams(new URL(started.authURL).hash.slice(2));
+  assert.equal(fragment.get("clientID"), h.store.plexClientID(kid.userID), "the sign-in is the child's device in Plex");
+  assert.equal(fragment.get("context[device][deviceName]"), "Leerr (kid)");
+  assert.equal(fragment.get("forwardUrl"), `${ORIGIN}/settings/users?plexLink=${started.id}`);
+  h.upstream.approvePin("admin-account");
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, kid)).status, 404, "only the administrator follows it");
+  const chosen = (await h.call("GET", `/api/v1/connections/plex/links/${started.id}`, admin)).json();
+  assert.deepEqual([chosen.state, chosen.mode], ["choose_profile", "managed"]);
+  const linked = await h.call("POST", `/api/v1/connections/plex/links/${started.id}/profile`, admin, { uuid: "kid-uuid", pin: "1234" });
+  assert.equal(linked.json().state, "linked");
+  assert.equal(h.store.secret(kid.userID, "plex", plexSecret)?.accountToken, "kid-account");
+  assert.equal(h.store.secret(admin.userID, "plex", plexSecret), null, "the administrator's own link is untouched");
+  const users = (await h.call("GET", "/api/v1/admin/users", admin)).json().items;
+  assert.deepEqual(users.find((user: { username: string }) => user.username === "kid").plex, { username: "Kid", managed: true });
+  // Members only ever link their own account: whoever sees the profile list picks from it.
+  const own = (await h.call("POST", "/api/v1/connections/plex/links", kid, { mode: "managed" })).json();
+  assert.equal(new URLSearchParams(new URL(own.authURL).hash.slice(2)).get("forwardUrl"), `${ORIGIN}/settings/connections?plexLink=${own.id}`);
+  h.upstream.approvePin("admin-account");
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${own.id}`, kid)).json().mode, "own");
+  // A profile linked to the wrong person is undone by an administrator.
+  assert.equal((await h.call("DELETE", `/api/v1/admin/users/${kid.userID}/plex`, kid)).status, 403);
+  assert.equal((await h.call("DELETE", `/api/v1/admin/users/${kid.userID}/plex`, admin)).status, 200);
+  assert.equal(h.store.secret(kid.userID, "plex", plexSecret), null);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${own.id}`, kid)).status, 404, "a sign-in in progress ends too");
+  const after = (await h.call("GET", "/api/v1/admin/users", admin)).json().items;
+  assert.equal(after.find((user: { username: string }) => user.username === "kid").plex, null);
+});
+
+test("a plex.tv hiccup while a sign-in is checked leaves it waiting, and the next check finishes it", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const alice = await h.user("alice");
+  const { id } = (await h.call("POST", "/api/v1/connections/plex/links", alice, {})).json();
+  h.upstream.approvePin("admin-account");
+  h.upstream.failServerToken = new UpstreamError("upstream_unavailable", 503, "plex.tv returned HTTP 503.");
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${id}`, alice)).json().state, "waiting");
+  assert.equal(h.store.secret(alice.userID, "plex", plexSecret), null);
+  h.upstream.failServerToken = null;
+  h.clock.advance(3_000);
+  assert.equal((await h.call("GET", `/api/v1/connections/plex/links/${id}`, alice)).json().state, "linked");
+  assert.ok(h.store.secret(alice.userID, "plex", plexSecret));
+});
+
+test("the library summary keeps the releases MusicBrainz resolved before it failed", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  h.upstream.releaseGroupsOf = async () => {
+    throw new PartialReleaseLookup(
+      new UpstreamError("upstream_unavailable", 503, "MusicBrainz returned HTTP 503."),
+      new Map([[identities.album.releaseMBID, identities.album.releaseGroupMBID]]),
+    );
+  };
+  const search = (await h.call("GET", "/api/v1/discover/search?q=x", admin)).json();
+  assert.equal(search.items.find((item: { id: string }) => item.id === identities.album.releaseGroupMBID).status, "available");
+  assert.equal(h.store.releaseGroups([identities.album.releaseMBID], h.clock.now()).get(identities.album.releaseMBID), identities.album.releaseGroupMBID);
+  assert.ok(h.events.some((entry) => entry.event === "release_lookup_failed"));
 });
 
 test("Last.fm can use the installation's API key, so members only need a username", async (t) => {
@@ -136,7 +345,7 @@ test("Last.fm can use the installation's API key, so members only need a usernam
   assert.deepEqual(seed.account, { username: "mia-fm", apiKey: "lastfm-key" });
 });
 
-test("library, albums and artwork are read with each user's own Jellyfin account", async (t) => {
+test("library, albums and artwork are read with each user's own Plex account", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
@@ -145,85 +354,97 @@ test("library, albums and artwork are read with each user's own Jellyfin account
   const page = (await h.call("GET", "/api/v1/library?limit=1", admin)).json();
   assert.equal(page.total, 2);
   assert.equal(page.items.length, 1);
-  assert.equal((await h.call("GET", "/api/v1/library?q=untag", admin)).json().items[0].id, "untagged");
+  assert.equal((await h.call("GET", "/api/v1/library?q=untag", admin)).json().items[0].id, plexIDs.untagged);
   assert.equal((await h.call("GET", "/api/v1/library?limit=501", admin)).status, 400);
-  assert.equal((await h.call("GET", "/api/v1/albums/available", member)).status, 404);
-  assert.equal((await h.call("GET", "/api/v1/library", stranger)).json().error.code, "jellyfin_not_connected");
-  const album = (await h.call("GET", "/api/v1/albums/available", admin)).json();
+  assert.equal((await h.call("GET", `/api/v1/albums/${plexIDs.album}`, member)).status, 404);
+  assert.equal((await h.call("GET", "/api/v1/albums/not-a-rating-key", admin)).status, 400, "Plex ids are decimal");
+  assert.equal((await h.call("GET", "/api/v1/library", stranger)).json().error.code, "plex_not_connected");
+  const album = (await h.call("GET", `/api/v1/albums/${plexIDs.album}`, admin)).json();
   assert.equal(album.tracks[0].codec, "flac");
   assert.equal(album.album.artistMBID, identities.album.artistMBID);
-  const artwork = await h.call("GET", "/api/v1/artwork/available?size=small", admin);
+  const artwork = await h.call("GET", `/api/v1/artwork/${plexIDs.album}?size=small`, admin);
   assert.equal(artwork.headers["content-type"], "image/png");
   assert.equal(artwork.headers["cache-control"], "private, max-age=86400");
   assert.equal(h.upstream.artworkSizes.at(-1), "small");
-  assert.equal((await h.call("GET", "/api/v1/artwork/available?size=huge", admin)).status, 400);
+  assert.equal((await h.call("GET", `/api/v1/artwork/${plexIDs.album}?size=huge`, admin)).status, 400);
   // Missing art is a cheap, cacheable 404 rather than an error every time.
-  const none = await h.call("GET", "/api/v1/artwork/untagged", admin);
+  const none = await h.call("GET", `/api/v1/artwork/${plexIDs.untagged}`, admin);
   assert.equal(none.status, 404);
   assert.equal(none.headers["cache-control"], "private, max-age=3600");
-  assert.equal((await h.call("GET", "/api/v1/artwork/available")).status, 401);
+  assert.equal((await h.call("GET", `/api/v1/artwork/${plexIDs.album}`)).status, 401);
 });
 
 test("the library can be sorted, filtered by artist or favourites, and browsed by artist", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  await h.call("GET", "/api/v1/library?sort=added&artist=artist-quiet&favorites=1", admin);
+  await h.call("GET", `/api/v1/library?sort=added&artist=${plexIDs.artist}&favorites=1`, admin);
   assert.deepEqual(h.upstream.libraryQueries.at(-1), {
     offset: 0,
     limit: 60,
     q: "",
     sort: "added",
-    artistID: "artist-quiet",
+    artistID: plexIDs.artist,
     favorites: true,
   });
   assert.equal((await h.call("GET", "/api/v1/library?sort=random", admin)).status, 400);
   assert.equal((await h.call("GET", "/api/v1/library?artist=..%2Fx", admin)).status, 400);
   const artists = (await h.call("GET", "/api/v1/library/artists", admin)).json();
-  assert.deepEqual(artists.items, [{ id: "artist-quiet", name: identities.album.artist, hasArtwork: false }]);
+  assert.deepEqual(artists.items, [{ id: plexIDs.artist, name: identities.album.artist, hasArtwork: false }]);
 });
 
-test("favourites and playlists go to the user's own Jellyfin account", async (t) => {
+test("favourites and playlists go to the user's own Plex account", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
   const member = await h.user("mia", "member", "member");
-  assert.equal((await h.call("PUT", "/api/v1/favorites/available", admin)).status, 200);
-  assert.equal((await h.call("GET", "/api/v1/library?favorites=1", admin)).json().items[0].id, "available");
-  assert.equal((await h.call("PUT", "/api/v1/favorites/available", member)).status, 404, "only items the user can see");
-  assert.equal((await h.call("DELETE", "/api/v1/favorites/available", admin)).status, 200);
+  assert.equal((await h.call("PUT", `/api/v1/favorites/${plexIDs.album}`, admin)).status, 200);
+  assert.equal((await h.call("GET", "/api/v1/library?favorites=1", admin)).json().items[0].id, plexIDs.album);
+  assert.equal((await h.call("PUT", `/api/v1/favorites/${plexIDs.album}`, member)).status, 404, "only items the user can see");
+  assert.equal((await h.call("DELETE", `/api/v1/favorites/${plexIDs.album}`, admin)).status, 200);
   assert.equal(h.upstream.favorites.size, 0);
   const playlists = (await h.call("GET", "/api/v1/playlists", admin)).json();
-  assert.equal(playlists.items[0].name, "Dinner");
-  const dinner = (await h.call("GET", "/api/v1/playlists/dinner", admin)).json();
-  assert.equal(dinner.tracks[0].albumID, "available");
-  assert.equal((await h.call("POST", "/api/v1/playlists/dinner/tracks", admin, { trackIDs: ["tone"] })).status, 200);
-  assert.deepEqual(h.upstream.playlistAdds, [{ playlistID: "dinner", trackIDs: ["tone"] }]);
-  assert.equal((await h.call("POST", "/api/v1/playlists/dinner/tracks", admin, { trackIDs: [] })).status, 400);
-  assert.equal((await h.call("GET", "/api/v1/playlists/dinner", member)).status, 404);
+  assert.deepEqual(playlists.items.map((playlist: { name: string; smart: boolean }) => [playlist.name, playlist.smart]), [["Dinner", false], ["Top rated", true]]);
+  const dinner = (await h.call("GET", `/api/v1/playlists/${plexIDs.playlist}`, admin)).json();
+  assert.equal(dinner.tracks[0].albumID, plexIDs.album);
+  assert.equal((await h.call("POST", `/api/v1/playlists/${plexIDs.playlist}/tracks`, admin, { trackIDs: [plexIDs.track] })).status, 200);
+  assert.deepEqual(h.upstream.playlistAdds, [{ playlistID: plexIDs.playlist, trackIDs: [plexIDs.track] }]);
+  assert.equal((await h.call("POST", `/api/v1/playlists/${plexIDs.playlist}/tracks`, admin, { trackIDs: [] })).status, 400);
+  assert.equal((await h.call("POST", `/api/v1/playlists/${plexIDs.smartPlaylist}/tracks`, admin, { trackIDs: [plexIDs.track] })).status, 409);
+  assert.equal((await h.call("GET", `/api/v1/playlists/${plexIDs.playlist}`, member)).status, 404);
 });
 
-test("playback is reported to Jellyfin with the user's account", async (t) => {
+test("playback is reported to Plex with the person's account, per browser, and Plex can end it", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  for (const [event, position] of [
-    ["start", 0],
-    ["progress", 31.5],
-    ["stop", 64],
+  const other = await h.login("root");
+  for (const [event, position, paused] of [
+    ["start", 0, false],
+    ["progress", 31.5, false],
+    ["progress", 40, true],
+    ["stop", 64, true],
   ] as const)
-    assert.equal((await h.call("POST", "/api/v1/playback", admin, { trackID: "tone", event, position })).status, 200);
+    assert.deepEqual((await h.call("POST", "/api/v1/playback", admin, { trackID: plexIDs.track, event, position, paused })).json(), {});
   assert.deepEqual(
-    h.upstream.reports.map((report) => [report.event, report.position]),
+    h.upstream.reports.map((report) => [report.state, report.position, report.durationMs]),
     [
-      ["start", 0],
-      ["progress", 31.5],
-      ["stop", 64],
+      ["playing", 0, 100],
+      ["playing", 31.5, 100],
+      ["paused", 40, 100],
+      ["stopped", 64, 100],
     ],
   );
-  assert.equal((await h.call("POST", "/api/v1/playback", admin, { trackID: "tone", event: "seek", position: 1 })).status, 400);
+  await h.call("POST", "/api/v1/playback", other, { trackID: plexIDs.track, event: "start", position: 0 });
+  const sessions = new Set(h.upstream.reports.map((report) => report.session));
+  assert.equal(sessions.size, 2, "each browser is its own player in Plex");
+  h.upstream.terminate = "The server owner stopped this stream.";
+  assert.deepEqual((await h.call("POST", "/api/v1/playback", admin, { trackID: plexIDs.track, event: "progress", position: 5 })).json(), {
+    stop: "The server owner stopped this stream.",
+  });
+  assert.equal((await h.call("POST", "/api/v1/playback", admin, { trackID: plexIDs.track, event: "seek", position: 1 })).status, 400);
   const stranger = await h.user("sam");
-  assert.equal((await h.call("POST", "/api/v1/playback", stranger, { trackID: "tone", event: "start", position: 0 })).status, 409);
+  assert.equal((await h.call("POST", "/api/v1/playback", stranger, { trackID: plexIDs.track, event: "start", position: 0 })).status, 409);
 });
 
 test("requests deduplicate per album, are shared across users, and become available per user", async (t) => {
@@ -253,28 +474,22 @@ test("requests deduplicate per album, are shared across users, and become availa
   assert.deepEqual(mine.library, { albums: 2, unmatched: 1 });
   // The member sees none of the admin's requests.
   assert.equal((await h.call("GET", "/api/v1/requests", member)).json().items.length, 0);
-  // Once the admin's Jellyfin can see the album, it is available to them.
-  h.upstream.libraries.get("admin-jelly-token")?.push(
-    fixtureAlbum({
-      id: "new-album",
-      title: identities.other.title,
-      artist: identities.other.artist,
-      releaseGroupMBID: identities.other.releaseGroupMBID,
-      releaseMBID: identities.other.releaseMBID,
-    }),
+  // Once the admin's Plex can see the album, it is available to them.
+  h.upstream.libraries.get("admin-plex-token")?.push(
+    fixtureAlbum({ id: "103", title: identities.other.title, artist: identities.other.artist, releaseMBID: identities.other.releaseMBID }),
   );
   h.context.library.invalidate();
   const now = (await h.call("GET", "/api/v1/requests", admin)).json().items[0];
   assert.equal(now.status, "available");
-  assert.equal(now.albumID, "new-album");
+  assert.equal(now.albumID, "103");
   assert.equal(h.upstream.createCalls, 1);
 });
 
-test("a Jellyfin outage does not block new requests", async (t) => {
+test("a Plex outage does not block new requests", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  h.upstream.failLibrary = new UpstreamError("upstream_unavailable", 503, "Jellyfin returned HTTP 503.");
+  h.upstream.failLibrary = new UpstreamError("upstream_unavailable", 503, "Plex returned HTTP 503.");
   assert.equal((await h.call("POST", "/api/v1/requests", admin, requestBody(identities.other))).status, 200);
 });
 
@@ -357,16 +572,54 @@ test("users retry their own failed requests; administrators see and manage all o
   assert.equal((await h.call("GET", "/api/v1/requests", member)).json().items.length, 0);
 });
 
-test("changing the Jellyfin server forgets every user's token and ends streams", async (t) => {
+test("the Plex address must be HTTPS and a claimed server; tokens never follow it to a different server", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  const ticket = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: "tone" })).json();
-  assert.equal((await h.call("PUT", "/api/v1/admin/settings/jellyfin", admin, { url: "http://insecure.test" })).status, 400);
-  assert.equal((await h.call("PUT", "/api/v1/admin/settings/jellyfin", admin, { url: "https://new.test/jf/" })).status, 200);
-  assert.equal(h.store.settings().jellyfinURL, "https://new.test/jf");
-  assert.equal(h.store.secret(admin.userID, "jellyfin", jellyfinSecret), null);
+  const ticket = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: plexIDs.track })).json();
+  const save = (url: string) => h.call("PUT", "/api/v1/admin/settings/plex", admin, { url });
+  assert.equal((await save("http://insecure.test")).status, 400);
+  h.upstream.claimed = false;
+  assert.equal((await save("https://unclaimed.test")).json().error.code, "plex_unclaimed");
+  h.upstream.claimed = true;
+  // The same server at another address (e.g. its plex.direct name): links are kept.
+  assert.equal((await save("https://127-0-0-1.abc.plex.direct:32400/")).status, 200);
+  assert.equal(h.store.settings().plexURL, "https://127-0-0-1.abc.plex.direct:32400");
+  assert.ok(h.store.secret(admin.userID, "plex", plexSecret));
+  assert.equal((await h.call("GET", ticket.url)).status, 200);
+  // Clearing the address switches Plex off but keeps the pinned server, so saving it again loses nothing.
+  h.store.saveSettings({ ...h.store.settings(), plexSection: "3" });
+  assert.equal((await save("")).status, 200);
+  assert.deepEqual([h.store.settings().plexURL, h.store.settings().plexMachineID], [null, PLEX_MACHINE]);
+  assert.equal((await h.call("GET", "/api/v1/library", admin)).json().error.code, "plex_not_configured");
+  assert.equal((await save("https://127-0-0-1.abc.plex.direct:32400")).status, 200);
+  assert.ok(h.store.secret(admin.userID, "plex", plexSecret));
+  assert.equal(h.store.settings().plexSection, "3");
+  // A different server: every link and ticket goes.
+  h.upstream.machineID = "another-machine";
+  assert.equal((await save("https://other.test")).status, 200);
+  assert.equal(h.store.settings().plexMachineID, "another-machine");
+  assert.equal(h.store.secret(admin.userID, "plex", plexSecret), null);
   assert.equal((await h.call("GET", ticket.url)).status, 401);
+  const settings = (await h.call("GET", "/api/v1/admin/settings", admin)).json();
+  assert.deepEqual([settings.plexURL, settings.plexSection], ["https://other.test", null]);
+});
+
+test("administrators see the music libraries their own Plex sign-in can see and may pick one", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin");
+  assert.equal((await h.call("GET", "/api/v1/admin/plex/sections", admin)).json().error.code, "plex_not_connected");
+  h.store.putSecret(admin.userID, "plex", JSON.stringify(plexLinkFor("admin")));
+  assert.deepEqual((await h.call("GET", "/api/v1/admin/plex/sections", admin)).json(), {
+    items: [{ key: "3", title: "Music", agent: "tv.plex.agents.music", scanner: "Plex Music" }],
+    selected: null,
+  });
+  assert.equal((await h.call("PUT", "/api/v1/admin/settings/plex/section", admin, { key: "3" })).status, 200);
+  assert.equal(h.store.settings().plexSection, "3");
+  assert.equal((await h.call("PUT", "/api/v1/admin/settings/plex/section", admin, { key: "../x" })).status, 400);
+  const member = await h.user("mia");
+  assert.equal((await h.call("PUT", "/api/v1/admin/settings/plex/section", member, { key: null })).status, 403);
 });
 
 test("Lidarr settings need a key, never carry a key to a new host, and restart unfinished work there", async (t) => {
@@ -465,7 +718,7 @@ test("discovery annotates results with library album ids and suggestions fail cl
     search.items.find((item: { id: string; status: string | null; albumID: string | null }) => item.id === id);
   assert.deepEqual(
     [found(identities.album.releaseGroupMBID).status, found(identities.album.releaseGroupMBID).albumID],
-    ["available", "available"],
+    ["available", plexIDs.album],
   );
   assert.equal(found(identities.other.releaseGroupMBID).status, null);
   assert.equal(search.artists.length, 1);
@@ -483,7 +736,7 @@ test("discovery annotates results with library album ids and suggestions fail cl
   const artist = (await h.call("GET", `/api/v1/discover/artists/${identities.album.artistMBID}/albums?type=ep`, admin)).json();
   assert.equal(artist.items.length, 0);
   assert.equal((await h.call("GET", `/api/v1/discover/artists/${identities.album.artistMBID}/albums?type=bootleg`, admin)).status, 400);
-  h.upstream.failLibrary = new UpstreamError("upstream_unavailable", 503, "Jellyfin returned HTTP 503.");
+  h.upstream.failLibrary = new UpstreamError("upstream_unavailable", 503, "Plex returned HTTP 503.");
   h.context.library.invalidate();
   assert.equal((await h.call("GET", "/api/v1/discover/recommendations?refresh=1", admin)).json().error.code, "library_unavailable");
   // Search still works; it just cannot say what is already owned.
@@ -582,7 +835,8 @@ test("the status page reports services, the worker and counts to administrators 
   await h.call("POST", "/api/v1/requests", member, requestBody(identities.album));
   await h.work();
   const status = (await h.call("GET", "/api/v1/admin/status", admin)).json();
-  assert.equal(status.jellyfin.state, "ok");
+  assert.equal(status.plex.state, "ok");
+  assert.equal(status.plex.version, "1.43.3.10861");
   assert.equal(status.lidarr.version, "3.1.0");
   assert.equal(status.acquisitions.acquiring, 1);
   assert.equal(status.worker.pendingChanges, 0);
@@ -613,23 +867,6 @@ test("upstream failures are logged once per route and minute, without secrets", 
   });
 });
 
-test("concurrent Jellyfin sign-ins cannot exceed a member's five guesses", async (t) => {
-  const h = await harness(t);
-  h.configure();
-  const mallory = await h.user("mallory");
-  let reached = 0;
-  h.upstream.jellyfinLogin = async () => {
-    reached++;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    throw new UpstreamError("upstream_auth", 502, "Jellyfin returned HTTP 401 (unauthorized).", "not_applied");
-  };
-  const statuses = await Promise.all(
-    Array.from({ length: 8 }, () => h.call("PUT", "/api/v1/connections/jellyfin", mallory, { username: "admin", password: "guess" })),
-  ).then((responses) => responses.map((response) => response.status));
-  assert.equal(reached, 5);
-  assert.equal(statuses.filter((status) => status === 429).length, 3);
-});
-
 test("a request whose Lidarr change needs attention can be withdrawn; members cannot re-check imported albums", async (t) => {
   const h = await harness(t);
   h.configure();
@@ -651,8 +888,8 @@ test("new releases leave out Various Artists", async (t) => {
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  h.upstream.libraries.get("admin-jelly-token")?.push(
-    fixtureAlbum({ id: "va", title: "Hits", artist: "Various Artists", artistMBID: "89ad4ac3-39f7-470e-963a-56509c546377" }),
+  h.upstream.libraries.get("admin-plex-token")?.push(
+    fixtureAlbum({ id: "104", title: "Hits", artist: "Various Artists", artistID: "590", artistMBID: "89ad4ac3-39f7-470e-963a-56509c546377" }),
   );
   await h.call("GET", "/api/v1/discover/new-releases", admin);
   assert.deepEqual(h.upstream.newReleaseQueries.at(-1)?.artists, [identities.album.artistMBID]);
@@ -679,4 +916,63 @@ test("each person's seen outcomes are kept on the server, and a new outcome is u
   h.store.updateAcquisition(row.id, {}, { status: "attention", reason: "Stuck." }, h.clock.now());
   assert.deepEqual(await unseen(mia), [["attention", true]]);
   assert.equal((await h.call("POST", "/api/v1/requests/seen", mia, { items: [{ id, status: "bogus" }] })).status, 400);
+});
+
+test("Plex albums are matched to requests by looking their MusicBrainz release up once, for everyone", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  const member = await h.user("mia", "member", "member");
+  const requests = (await h.call("GET", "/api/v1/requests", admin)).json();
+  assert.deepEqual(requests.library, { albums: 2, unmatched: 1 });
+  assert.deepEqual(h.upstream.releaseLookups, [[identities.album.releaseMBID]]);
+  assert.equal(h.store.releaseGroups([identities.album.releaseMBID], h.clock.now()).get(identities.album.releaseMBID), identities.album.releaseGroupMBID);
+  // The admin's album page links to its release group without asking again.
+  assert.equal((await h.call("GET", `/api/v1/albums/${plexIDs.album}`, admin)).json().album.releaseGroupMBID, identities.album.releaseGroupMBID);
+  // An edition someone looked at in Discover is known without MusicBrainz.
+  await h.call("GET", `/api/v1/discover/release-groups/${identities.other.releaseGroupMBID}/editions`, member);
+  await h.call("GET", "/api/v1/requests", member);
+  assert.equal(h.upstream.releaseLookups.length, 1);
+  // MusicBrainz being down leaves albums unresolved for now, without failing anything.
+  h.upstream.libraries.get("admin-plex-token")?.push(
+    fixtureAlbum({ id: "105", title: "Later", artist: "Someone", releaseMBID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+  );
+  h.upstream.failReleaseLookup = new UpstreamError("upstream_unavailable", 503, "MusicBrainz returned HTTP 503.");
+  h.context.library.invalidate();
+  assert.deepEqual((await h.call("GET", "/api/v1/requests", admin)).json().library, { albums: 3, unmatched: 1 });
+  assert.ok(h.events.some((entry) => entry.event === "release_lookup_failed"));
+});
+
+test("an arrived album Plex did not match is pointed at, so it can be played and fixed in Plex", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  const { id } = (await h.call("POST", "/api/v1/requests", admin, requestBody(identities.other))).json();
+  await h.reconciler.settle();
+  const acquisition = h.store.acquisitions()[0];
+  h.store.updateAcquisition(acquisition.id, {}, { status: "imported", phase: "finished" }, h.clock.now());
+  const item = async () => (await h.call("GET", "/api/v1/requests", admin)).json().items.find((entry: { id: string }) => entry.id === id);
+  assert.deepEqual([(await item()).status, (await item()).unmatchedAlbumID], ["imported", null], "not in Plex yet");
+  // Plex scanned it but matched nothing (or another album); the names still agree, give or take case and punctuation.
+  h.upstream.libraries.get("admin-plex-token")?.push(fixtureAlbum({ id: "106", title: "coastal lines!", artist: "MIRA SOL" }));
+  h.context.library.invalidate();
+  assert.deepEqual([(await item()).status, (await item()).albumID, (await item()).unmatchedAlbumID], ["imported", null, "106"]);
+});
+
+test("tracks browsers cannot play are converted by Plex, and seeking starts the conversion again", async (t) => {
+  const h = await harness(t);
+  h.configure();
+  const admin = await h.user("root", "admin", "admin");
+  const direct = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: plexIDs.track })).json();
+  assert.equal(direct.transcoded, false);
+  const ticket = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: plexIDs.alacTrack })).json();
+  assert.equal(ticket.transcoded, true);
+  const stream = await h.call("GET", `${ticket.url}?start=42.5`);
+  assert.equal(stream.status, 200);
+  assert.equal(stream.headers["content-type"], "audio/mpeg");
+  assert.equal(stream.headers["accept-ranges"], "none");
+  assert.deepEqual(h.upstream.transcodes.map((entry) => [entry.trackID, entry.offset]), [[plexIDs.alacTrack, 42.5]]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.upstream.stoppedTranscodes, [h.upstream.transcodes[0].session], "the conversion ends with the response");
+  assert.equal((await h.call("GET", `${ticket.url}?start=-1`)).status, 400);
 });

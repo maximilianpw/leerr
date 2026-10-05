@@ -88,6 +88,25 @@ export const send = (path: string, method: Method, body?: Json) =>
  * A write whose outcome nobody waits for (playback reports). `keepalive` lets
  * it finish while the page unloads; sendBeacon cannot carry the CSRF header.
  */
+const playbackReply = z.object({ stop: z.optional(z.string()) });
+
+/**
+ * Reports playback; best effort, never rejects. Resolves with Plex's reason
+ * when it ended this playback (for example its owner stopped it), else null.
+ */
+export async function reportPlayback(body: Json, keepalive: boolean): Promise<string | null> {
+  const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json" });
+  if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
+  try {
+    const response = await fetch(`${BASE}/playback`, { method: "POST", body: JSON.stringify(body), headers, credentials: "same-origin", keepalive });
+    if (!response.ok) return null;
+    const parsed = playbackReply.safeParse(await response.json());
+    return parsed.success ? (parsed.data.stop ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Best effort by design: resolves when the request is done, and never rejects. */
 export async function sendInBackground(path: string, body: Json, keepalive = false): Promise<void> {
   const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json" });
@@ -141,6 +160,8 @@ export const albumSchema = z.object({
   releaseMBID: nullableString,
   hasArtwork: z.boolean(),
   favorite: z.boolean(),
+  /** False for albums in Plex's trash: their files are gone. */
+  available: z.boolean(),
 });
 export type Album = z.infer<typeof albumSchema>;
 export const libraryPageSchema = z.object({ items: z.array(albumSchema), total: z.number() });
@@ -163,6 +184,8 @@ export const trackSchema = z.object({
   sampleRate: nullableNumber,
   bitDepth: nullableNumber,
   favorite: z.boolean(),
+  /** False for tracks in Plex's trash. */
+  available: z.boolean(),
 });
 export type Track = z.infer<typeof trackSchema>;
 export const albumDetailSchema = z.object({ album: albumSchema, tracks: z.array(trackSchema) });
@@ -172,11 +195,18 @@ export const playlistSchema = z.object({
   tracks: nullableNumber,
   duration: nullableNumber,
   hasArtwork: z.boolean(),
+  /** Plex fills smart playlists from rules: tracks cannot be added to them. */
+  smart: z.boolean(),
 });
 export type Playlist = z.infer<typeof playlistSchema>;
 export const playlistsSchema = z.object({ items: z.array(playlistSchema) });
 export const playlistDetailSchema = z.object({ playlist: playlistSchema, tracks: z.array(trackSchema) });
-export const ticketSchema = z.object({ url: z.string(), expiresAt: z.string() });
+export const ticketSchema = z.object({
+  url: z.string(),
+  expiresAt: z.string(),
+  /** Plex converts this track for the browser: the stream cannot be ranged, so seeking asks for a new start. */
+  transcoded: z.boolean(),
+});
 
 export const candidateSchema = z.object({
   id: z.string(),
@@ -245,6 +275,8 @@ export const requestItemSchema = z.object({
   reason: nullableString,
   retryable: z.boolean(),
   albumID: nullableString,
+  /** An arrived album Plex has not matched to this request's album (Fix Match in Plex). */
+  unmatchedAlbumID: nullableString,
   requestedAt: z.string(),
   updatedAt: z.string(),
 });
@@ -256,9 +288,9 @@ export const requestsSchema = z.object({
 });
 
 export const connectionsSchema = z.object({
-  jellyfinConfigured: z.boolean(),
-  jellyfin: nullableString,
-  jellyfinValid: z.nullable(z.boolean()),
+  plexConfigured: z.boolean(),
+  plex: z.nullable(z.object({ username: z.string(), managed: z.boolean() })),
+  plexValid: z.nullable(z.boolean()),
   lastfm: nullableString,
   lastfmKeyProvided: z.boolean(),
   lidarrConfigured: z.boolean(),
@@ -278,8 +310,22 @@ export const sessionsSchema = z.object({
   ),
 });
 export const notifyFormats = ["ntfy", "discord", "json"] as const;
+export const plexLinkStartSchema = z.object({ id: z.string(), authURL: z.string(), expiresAt: z.string() });
+export const plexLinkSchema = z.object({
+  state: z.enum(["waiting", "choose_profile", "linked", "expired", "no_access", "no_profiles", "in_use"]),
+  mode: z.enum(["own", "managed"]),
+  username: nullableString,
+  profiles: z.array(z.object({ uuid: z.string(), name: z.string(), protected: z.boolean() })),
+  expiresAt: z.string(),
+});
+export type PlexLink = z.infer<typeof plexLinkSchema>;
+export const plexSectionsSchema = z.object({
+  items: z.array(z.object({ key: z.string(), title: z.string(), agent: z.string(), scanner: z.string() })),
+  selected: nullableString,
+});
 export const adminSettingsSchema = z.object({
-  jellyfinURL: nullableString,
+  plexURL: nullableString,
+  plexSection: nullableString,
   lidarrURL: nullableString,
   lidarrConfigured: z.boolean(),
   lidarrReady: z.boolean(),
@@ -300,7 +346,13 @@ export const lidarrOptionsSchema = z.object({
 });
 export type LidarrOptions = z.infer<typeof lidarrOptionsSchema>;
 export const usersSchema = z.object({
-  items: z.array(z.extend(userSchema, { disabled: z.boolean(), createdAt: z.string() })),
+  items: z.array(
+    z.extend(userSchema, {
+      disabled: z.boolean(),
+      createdAt: z.string(),
+      plex: z.nullable(z.object({ username: z.string(), managed: z.boolean() })),
+    }),
+  ),
 });
 export const acquisitionsSchema = z.object({
   items: z.array(
@@ -327,7 +379,7 @@ const probeSchema = z.object({
 });
 export type Probe = z.infer<typeof probeSchema>;
 export const statusSchema = z.object({
-  jellyfin: probeSchema,
+  plex: probeSchema,
   lidarr: probeSchema,
   lidarrReady: z.boolean(),
   worker: z.object({

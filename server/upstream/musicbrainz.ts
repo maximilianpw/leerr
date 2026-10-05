@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { UpstreamError } from "./errors.ts";
-import { HttpClient, parseBody, type JsonValue } from "./http.ts";
+import { HttpClient, parseBody, statusError, type JsonValue } from "./http.ts";
 import type { Identity } from "./lidarr.ts";
 
 export type AlbumCandidate = {
@@ -46,6 +46,10 @@ const SPACING = 1_100;
 const MAX_QUEUE = 20_000;
 /** Each page of editions costs one rate-limited call. */
 const MAX_EDITIONS = 300;
+/** Releases resolved per search call; MusicBrainz returns at most 100 results. */
+const RELEASE_BATCH = 100;
+/** Releases a search missed (new, or merged into another id) that are then looked up one by one. */
+const MAX_SINGLE_LOOKUPS = 10;
 
 const mbid = z
   .string()
@@ -127,6 +131,15 @@ function toCandidate(value: z.infer<typeof group>): AlbumCandidate {
   };
 }
 
+/** MusicBrainz failed part-way through: what was resolved before is kept, the rest waits for a later call. */
+export class PartialReleaseLookup extends UpstreamError {
+  readonly resolved: Map<string, string | null>;
+  constructor(cause: UpstreamError, resolved: Map<string, string | null>) {
+    super(cause.code, cause.status, cause.message, cause.outcome);
+    this.resolved = resolved;
+  }
+}
+
 export class MusicBrainz {
   readonly #http: HttpClient;
   /** Monotonic: a wall-clock step backwards must not stall every call. */
@@ -137,20 +150,71 @@ export class MusicBrainz {
     this.#clock = clock;
   }
 
-  async #get(path: string, parameters: Record<string, string>): Promise<JsonValue> {
+  /** Waits for this call's turn: every call, of every kind, shares one rate limit. */
+  async #turn(path: string, parameters: Record<string, string>): Promise<URL> {
     const delay = Math.max(0, this.#next - this.#clock());
     if (delay > MAX_QUEUE)
       throw new UpstreamError("upstream_unavailable", 503, "MusicBrainz is busy. Try again in a few seconds.");
     this.#next = this.#clock() + delay + SPACING;
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     const url = new URL(path, BASE);
-    for (const [key, value] of Object.entries({ ...parameters, fmt: "json" }))
-      url.searchParams.set(key, value);
-    return this.#http.json(
-      url,
+    for (const [key, value] of Object.entries({ ...parameters, fmt: "json" })) url.searchParams.set(key, value);
+    return url;
+  }
+  async #get(path: string, parameters: Record<string, string>): Promise<JsonValue> {
+    return this.#http.json(await this.#turn(path, parameters), { headers: { Accept: "application/json", "User-Agent": USER_AGENT } }, { service: SERVICE });
+  }
+
+  /** Like #get, but a 404 is an answer (no such entity) rather than an error. */
+  async #lookup(path: string, parameters: Record<string, string>): Promise<JsonValue | null> {
+    const result = await this.#http.jsonResponse(
+      await this.#turn(path, parameters),
       { headers: { Accept: "application/json", "User-Agent": USER_AGENT } },
       { service: SERVICE },
     );
+    if (result.status === 404) return null;
+    if (result.status < 200 || result.status > 299) throw statusError(result.status, SERVICE);
+    return result.body;
+  }
+
+  /**
+   * The release group of each release (Plex identifies albums by release).
+   * Unknown releases map to null; ids beyond this call's lookup budget are
+   * left out, for a later call.
+   */
+  async releaseGroupsOf(releaseMBIDs: string[]): Promise<Map<string, string | null>> {
+    const found = new Map<string, string | null>();
+    const wanted = new Set<string>();
+    for (const id of releaseMBIDs) {
+      const parsed = mbid.safeParse(id);
+      // Not a MusicBrainz id at all (e.g. a hand-edited file tag): nothing to look up.
+      if (parsed.success) wanted.add(parsed.data);
+      else found.set(id, null);
+    }
+    const ids = [...wanted];
+    const searched = z.object({ releases: z.array(z.object({ id: mbid, "release-group": z.object({ id: mbid }).loose() }).loose()) }).loose();
+    try {
+      for (let start = 0; start < ids.length; start += RELEASE_BATCH) {
+        const batch = ids.slice(start, start + RELEASE_BATCH);
+        const result = parseBody(
+          searched,
+          await this.#get("release", { query: `reid:(${batch.map((id) => `"${id}"`).join(" OR ")})`, limit: String(RELEASE_BATCH) }),
+          SERVICE,
+        );
+        // Search results come in relevance order, so they are matched by id.
+        const asked = new Set(batch);
+        for (const release of result.releases) if (asked.has(release.id)) found.set(release.id, release["release-group"].id);
+      }
+      // Merged ids redirect, so the answer is keyed by the id asked for, not the one returned.
+      for (const id of ids.filter((value) => !found.has(value)).slice(0, MAX_SINGLE_LOOKUPS)) {
+        const body = await this.#lookup(`release/${id}`, { inc: "release-groups" });
+        found.set(id, body === null ? null : parseBody(z.object({ "release-group": z.object({ id: mbid }).loose() }).loose(), body, SERVICE)["release-group"].id);
+      }
+    } catch (cause) {
+      if (!(cause instanceof UpstreamError) || !found.size) throw cause;
+      throw new PartialReleaseLookup(cause, found);
+    }
+    return found;
   }
 
   async releaseGroups(query: string, offset = 0, limit = 25): Promise<CandidatePage> {

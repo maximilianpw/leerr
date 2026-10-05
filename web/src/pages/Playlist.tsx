@@ -2,6 +2,7 @@ import { ArrowLeft, Disc3, ListMusic, Play, Shuffle } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { artworkURL, playlistDetailSchema, request } from "../api.ts";
 import { useResource } from "../hooks.ts";
+import { playable } from "../playback.ts";
 import { usePlayer } from "../player.tsx";
 import { goBack } from "../router.tsx";
 import { TrackList } from "../tracks.tsx";
@@ -32,14 +33,15 @@ export function PlaylistPage({ id }: { id: string }) {
       </div>
     );
   const { playlist, tracks } = detail.data;
+  const ready = playable(tracks);
   const total = tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0);
   const play = (shuffle: boolean) => {
     if (shuffle) {
-      player.controller.playShuffled(tracks);
+      player.controller.playShuffled(ready);
       return;
     }
     player.controller.setShuffle(false);
-    player.controller.playQueue(tracks, 0);
+    player.controller.playQueue(ready, 0);
   };
   return (
     <div className="page">
@@ -62,10 +64,10 @@ export function PlaylistPage({ id }: { id: string }) {
             {[`${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}`, total ? formatDuration(total) : ""].filter((part) => part).join(" · ")}
           </p>
           <div className="heroActions">
-            <button type="button" className="primary" disabled={!tracks.length} onClick={() => play(false)}>
+            <button type="button" className="primary" disabled={!ready.length} onClick={() => play(false)}>
               <Play aria-hidden="true" /> Play
             </button>
-            <button type="button" className="secondary" disabled={!tracks.length} onClick={() => play(true)}>
+            <button type="button" className="secondary" disabled={!ready.length} onClick={() => play(true)}>
               <Shuffle aria-hidden="true" /> Shuffle
             </button>
           </div>

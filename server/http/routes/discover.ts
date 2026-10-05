@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { top, type LibrarySummary } from "../../library.ts";
 import { albumTypes, ARTIST_PAGE, UpstreamError, type AlbumCandidate, type RecommendationSeed } from "../../upstream/index.ts";
-import { hasJellyfin, jellyfinAccess, lastfmAccount, lastfmKey, mbidParam, type AppContext } from "../context.ts";
+import { hasPlex, lastfmAccount, lastfmKey, mbidParam, plexUnavailable, withPlex, type AppContext } from "../context.ts";
 import { APIError } from "../errors.ts";
 
 type CandidateStatus = "available" | "requested" | null;
@@ -36,11 +36,11 @@ export function discoverRoutes(app: FastifyInstance, context: AppContext) {
 
   /** Best effort: search still works when the user's library cannot be read. */
   async function librarySummary(userID: string): Promise<LibrarySummary | null> {
-    if (!hasJellyfin(context, userID)) return null;
+    if (!hasPlex(context, userID)) return null;
     try {
-      return await context.library.summary(userID, jellyfinAccess(context, userID));
+      return await withPlex(context, userID, (access) => context.library.summary(userID, access));
     } catch (cause) {
-      if (cause instanceof UpstreamError) return null;
+      if (plexUnavailable(cause)) return null;
       throw cause;
     }
   }
@@ -80,7 +80,10 @@ export function discoverRoutes(app: FastifyInstance, context: AppContext) {
   app.get("/api/v1/discover/release-groups/:id/editions", async (request) => {
     auth.require(request);
     const { id } = mbidParam.parse(request.params);
-    return upstream.editions(id);
+    const editions = await upstream.editions(id);
+    // Plex names albums by edition: knowing every edition's group saves MusicBrainz lookups later.
+    store.saveReleaseGroups(new Map(editions.items.map((edition) => [edition.id, id])), context.now());
+    return editions;
   });
 
   app.get("/api/v1/discover/recommendations", async (request) => {
@@ -89,16 +92,16 @@ export function discoverRoutes(app: FastifyInstance, context: AppContext) {
     const account = lastfmAccount(context, user.id);
     const installationKey = store.settings().lastfmKey;
     let library: LibrarySummary | null = null;
-    if (hasJellyfin(context, user.id))
+    if (hasPlex(context, user.id))
       try {
-        library = await context.library.summary(user.id, jellyfinAccess(context, user.id));
+        library = await withPlex(context, user.id, (access) => context.library.summary(user.id, access));
       } catch (cause) {
         // Suggesting albums the user already owns is worse than suggesting nothing.
         if (cause instanceof UpstreamError)
           throw new APIError(
             cause.status,
-            cause.code === "jellyfin_reconnect" ? cause.code : "library_unavailable",
-            `Suggestions need your Jellyfin library to leave out albums you have. ${cause.message}`,
+            cause.code === "plex_reconnect" ? cause.code : "library_unavailable",
+            `Suggestions need your Plex library to leave out albums you have. ${cause.message}`,
           );
         throw cause;
       }

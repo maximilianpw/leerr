@@ -1,7 +1,8 @@
 # Architecture
 
 ```text
-Browser ── HTTPS proxy ── Leerr (one Node process) ──┬── Jellyfin   (per-user tokens)
+Browser ── HTTPS proxy ── Leerr (one Node process) ──┬── Plex Media Server (per-person server tokens)
+                                │                     ├── plex.tv    (sign-in, per-person account tokens)
                                 │                     ├── Lidarr     (installation key)
                                 │                     ├── MusicBrainz
                                 │                     ├── Last.fm    (per-user or installation API key)
@@ -25,7 +26,8 @@ beside it.
 | `server/acquisitions.ts` | `Reconciler`: the Lidarr state machine |
 | `server/notifications.ts` | Turns acquisition outcomes into notifications |
 | `server/backups.ts` | Scheduled online backups |
-| `server/library.ts` | Cached per-user summary of the Jellyfin library (release groups, album artists) |
+| `server/library.ts` | Cached per-user summary of the Plex library (release groups, album artists) |
+| `server/keepalive.ts` | Uses each Plex sign-in on plex.tv once a day so idle ones do not expire |
 | `server/upstream/` | Bounded HTTP client and one module per service, behind the `Upstreams` interface |
 | `server/http/app.ts` | Fastify setup, security hooks, rate limits, error mapping, static files |
 | `server/http/auth.ts` | Sessions, CSRF, sign-in throttling |
@@ -60,12 +62,11 @@ build step. The code is restricted to erasable TypeScript syntax
   failure budget instead, so other people's guesses cannot lock the owner out.
   Browsers keep one such cookie per account, so everyone sharing a browser
   stays protected. An administrator's password reset or re-enable lifts the
-  account lock. Connecting Jellyfin is throttled per Leerr user (5 wrong
-  passwords per 15 minutes), so Leerr cannot be used to guess Jellyfin
-  passwords.
+  account lock. Plex sign-in happens on Plex's own page, so no Plex password
+  ever reaches Leerr.
 - **Rate limits** are per person once signed in (300 requests a minute, with
   separate, larger budgets for artwork and streams; password changes and
-  Jellyfin sign-ins 10 per 15 minutes) and per address otherwise (sign-in 10
+  starting Plex sign-ins 10 per 15 minutes) and per address otherwise (sign-in 10
   and setup 5 per 15 minutes), so a household behind one address does not share
   a budget. A 429's message states the limiter's real wait.
 - **Revocation takes effect immediately.** Every authenticated response is
@@ -75,15 +76,39 @@ build step. The code is restricted to erasable TypeScript syntax
   associated data is `owner + NUL + service`, so a ciphertext cannot be moved to
   another user or service. The key lives in a separate file, not in SQLite, and
   a wrong key stops startup with a message saying so.
-- **Credentials never follow a URL change.** A new Jellyfin server address
-  deletes every stored Jellyfin token, a new Lidarr address requires its own
-  key, and a new notification address never inherits the old token. Upstream
-  redirects are never followed.
-- **Jellyfin sign-ins are per person.** Leerr signs in to Jellyfin as a
-  separate device for each Leerr user (a stable id derived from the user id), so
-  two people sharing a Jellyfin account cannot revoke each other's tokens. When
-  Jellyfin stops accepting a saved token, the API says so (`jellyfin_reconnect`)
-  without signing the person out of Leerr.
+- **Credentials never follow a server change.** Saving the Plex address asks
+  the server who it is (`/identity`, which must be a claimed server) and pins
+  its machine identifier: tokens are only ever sent to that machine. Saving an
+  address that answers as a different server deletes every Plex link (clearing
+  the address keeps the pinned machine and the links); an
+  address that later cannot prove it is that machine (another server, a
+  proxy's error page, no answer) gets no tokens at all (`plex_wrong_server`,
+  checked every ten minutes). A new Lidarr address
+  requires its own key, and a new notification address never inherits the old
+  token. Upstream redirects are never followed.
+- **Plex sign-in.** Leerr's server creates a strong PIN on plex.tv with the
+  person's own random client identifier (plex.tv only gives a PIN's token to
+  the identifier that created it), keeps the PIN in memory bound to that Leerr
+  session, and sends the browser to Plex's page with only an opaque id. Plex's
+  consent page names the Leerr account ("Leerr (alice)"), and Leerr shows which
+  Plex account approved. Leerr keeps two encrypted tokens per person: the
+  plex.tv account token (to fetch a current server token and keep the sign-in
+  alive; for a full account it is that person's whole Plex sign-in) and the
+  token plex.tv issues for this server. A shared user's or
+  managed profile's account token is never sent to the server; for the
+  server's owner, plex.tv issues the account token itself as the server token,
+  which is why the identity check above fails closed. One Plex account or
+  profile can belong to only one Leerr user. When the server rejects a token, Leerr asks plex.tv once
+  for a current one before saying so (`plex_reconnect`), without signing the
+  person out of Leerr. Disconnecting signs the token out on plex.tv.
+- **Managed Home profiles** are linked only by an administrator who is a full
+  member of the Plex Home, from Settings → Users on their own device: whoever
+  sees the Home's profile list picks from it, so it must not be the person the
+  profile is for. They pick one of the Home's managed profiles (with its PIN,
+  if it has one), and Leerr keeps only that profile's token. Only managed
+  profiles can be picked; the member's own token is never stored. An
+  administrator can unlink anyone's Plex link (a profile given to the wrong
+  person).
 - **Upstream responses are untrusted**: every one is schema-validated,
   size-capped (2 MB JSON, 5 MB artwork) and time-limited, including the body.
   Error messages describe the status but never echo response bodies or keys.
@@ -97,9 +122,12 @@ build step. The code is restricted to erasable TypeScript syntax
 
 ## Data ownership
 
-- The **Jellyfin server URL** is set by an administrator. Each **user** stores
-  their own Jellyfin token, so library, artwork, favourites, playlists and
-  playback always follow that user's Jellyfin permissions.
+- The **Plex server address** (and, optionally, which music library to use)
+  is set by an administrator. Each **user** links their own Plex account, so
+  library, artwork, favourites, playlists and playback always follow that
+  account's Plex permissions. A favourite is Plex's five-star rating, the same
+  one Plexamp and Plex Web show; removing a favourite only clears a five-star
+  rating, never another one.
 - **Lidarr** belongs to the installation. An album has one **acquisition**,
   keyed by its MusicBrainz release group. Each user's **request** points to it,
   so two people requesting the same album share a single download. Withdrawing a
@@ -107,9 +135,13 @@ build step. The code is restricted to erasable TypeScript syntax
 - **Last.fm**: each person may connect a username with their own API key, or
   with only a username when an administrator set an installation-wide key.
 - **"Imported"** means Lidarr has a file for every track (any edition).
-  **"In your library"** is worked out per user: their own Jellyfin account can
-  see that release group. That needs MusicBrainz release-group ids in Jellyfin's
-  album metadata; Requests says when albums lack them.
+  **"In your library"** is worked out per user: their own Plex account can see
+  an album of that release group. Plex names each matched album's MusicBrainz
+  **release** (one edition), not its group, so Leerr looks releases up on
+  MusicBrainz (100 per call) and remembers the answer for everyone in the
+  `releaseGroups` table; editions seen in Discover and requested editions are
+  known without asking. Albums Plex has not matched (`local://`) cannot be
+  recognised; Requests says how many there are.
 
 ## Playback
 
@@ -122,19 +154,23 @@ fails (for example a ticket expired during a long pause), the player gets a new
 ticket and resumes at the same position; if that fails too, it asks the server
 why and shows that reason.
 
-The proxy re-checks the track against the user's Jellyfin account, then streams
-the original file (`static=true`, no transcoding). It forwards `Range` and
-`If-Range` and passes 200/206/416 responses through without buffering. Each
-session may have four streams open at once; a stream's slot is freed as soon as
-its response finishes. Whether a file plays depends on the browser's codec
-support: FLAC, MP3, AAC and Opus work in current browsers, while ALAC generally
-only works in Safari.
+The proxy re-checks the track against the user's Plex account, then streams
+the original file (Plex's part path, never in download mode). It forwards
+`Range` and `If-Range` and passes 200/206/416 responses through without
+buffering. Formats browsers cannot play (ALAC, AIFF, WMA, APE and similar; FLAC, MP3,
+AAC, Opus, Vorbis and WAV play as they are) are converted by Plex to a
+progressive 320 kb/s MP3. A converted stream cannot be ranged, so the player
+seeks by asking for a new conversion from that point (`?start=`), and the
+conversion is stopped when its listener leaves. Each session may have four
+streams open at once; a stream's slot is freed as soon as its response finishes.
 
 The player (`web/src/playback.ts`) keeps the queue, shuffle and repeat. It fetches
 the next track's ticket while the current one plays, reports start, progress
-(every 30 seconds and on pause) and stop to Jellyfin, and saves the queue and
-position in the browser's local storage per user (never tickets), so a reload
-resumes paused. Signing out reports the stop to Jellyfin first, then clears it;
+(every 10 seconds and on pause) and stop to Plex's timeline, as its own player
+(one per browser), and saves the queue and position in the browser's local
+storage per user (never tickets), so a reload resumes paused. When Plex ends a
+playback (for example its owner stopped it), the player stops and says why.
+Signing out reports the stop to Plex first, then clears the queue;
 so does finding the browser signed out (an expired or revoked session) or a
 sign-out in another tab. Which request outcomes a person has seen (the Requests
 badge) is kept on the server, not in the browser.
@@ -147,7 +183,7 @@ Each acquisition has a user-visible **status** and an internal **phase**:
 |---|---|---|
 | `requested` | Queued, waiting for Lidarr's root folder and profiles, or being added to Lidarr | wait |
 | `acquiring` | Lidarr is searching, downloading or importing | wait |
-| `imported` | Lidarr has every track | none; it appears once Jellyfin scans |
+| `imported` | Lidarr has every track | none; it appears once Plex scans |
 | `failed` | The search failed, nothing was grabbed within 24 h, the edition is missing from Lidarr's metadata, or the album was removed from Lidarr | **Retry** |
 | `attention` | Leerr could not confirm a change it made in Lidarr, a download is stuck or has run for a week, or Leerr hit an internal error | check Lidarr, then **Retry** or remove |
 
@@ -211,7 +247,8 @@ tracking it; Lidarr is not changed.
 - Suggestions are cached per user for 30 minutes and new releases for 6 hours;
   a failure is remembered for a minute. The per-user library summary is cached
   for two minutes (a failed walk for 30 seconds) and cleared when that user's
-  Jellyfin connection changes.
+  Plex link changes. At most 300 releases are looked up on MusicBrainz per walk,
+  so a large first library is recognised over a few walks.
 - The player saves up to 1,000 queued tracks around the current one.
-- Last.fm access is read-only public data. Scrobbling happens through Jellyfin's
-  own plugins, from the playback Leerr reports.
+- Last.fm access is read-only public data. Plex itself records plays, and
+  forwards them to Last.fm when its owner linked Last.fm in Plex.

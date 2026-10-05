@@ -4,9 +4,13 @@
 
 - One host that runs Docker, or Node 24 (see [nix.md](nix.md) for the Nix package).
 - An HTTPS reverse proxy in front of Leerr. Leerr refuses plain HTTP.
-- Jellyfin 10.9 or newer (tested with 12.1), reachable from Leerr over HTTPS.
-  Lidarr 2 or newer (tested with 3.1), also over HTTPS, is needed for requests. Their certificates must be ones Node trusts: public, or from a
-  CA you add (see [Private CA](#private-ca-or-self-signed-upstreams)).
+- A Plex Media Server (tested with 1.43) that is claimed (signed in to a Plex
+  account), with a music library using the **Plex Music** agent, reachable from
+  Leerr over HTTPS (see [Plex](#plex)). Leerr also needs to reach plex.tv, for
+  people's sign-ins.
+- Lidarr 2 or newer (tested with 3.1), also over HTTPS, for requests. Its
+  certificate must be one Node trusts: public, or from a CA you add (see
+  [Private CA](#private-ca-or-self-signed-upstreams)).
 - A 32-byte encryption key in its own file, stored and backed up separately from
   the data, and outside any Git checkout.
 
@@ -20,7 +24,7 @@
 | `LEERR_DATA` | no | Data directory (default `./data`; `/data` in the image) |
 | `LEERR_BACKUP_DIR` | no | Turns on scheduled backups into this directory |
 | `LEERR_BACKUP_HOURS`, `LEERR_BACKUP_KEEP` | no | How often (default every 24 hours) and how many to keep (default 7) |
-| `NODE_EXTRA_CA_CERTS` | no | A PEM file with extra CAs to trust for Jellyfin and Lidarr |
+| `NODE_EXTRA_CA_CERTS` | no | A PEM file with extra CAs to trust for Lidarr (or a Plex behind your own proxy) |
 | `HOST`, `PORT` | no | Listen address (default `0.0.0.0:3000`) |
 
 Create the key once, outside any checkout, and never replace it for an existing
@@ -139,22 +143,109 @@ HAProxy: `option forwardfor` and `http-request set-header X-Forwarded-Proto http
 1. Open the site. It asks for a **setup token**: read it from `setup-token` in
    the data directory (`docker compose exec leerr cat /data/setup-token`). The
    token is deleted once the first administrator exists.
-2. **Settings → Server:** enter the Jellyfin address. Then enter the Lidarr
-   address and API key, save, choose a root folder and the quality and metadata
-   profiles, and save again. Requests made before the profiles are chosen wait,
-   and start as soon as you save them.
+2. **Settings → Server:** enter the Plex server's HTTPS address (see
+   [Plex](#plex)). Then enter the Lidarr address and API key, save, choose a
+   root folder and the quality and metadata profiles, and save again. Requests
+   made before the profiles are chosen wait, and start as soon as you save them.
 3. Optionally, still under **Server**: a Last.fm API key for everyone (members
    then connect Last.fm with just a username, and people without Last.fm get
    suggestions from their own library), and a notification address.
-4. **Settings → Connections:** each person connects their own Jellyfin account.
+4. **Settings → Connections:** each person signs in with their own Plex account.
+   Once you have, **Server** also lets you choose the music library, if the
+   server has more than one.
 5. **Settings → Users:** add people. Share their temporary password privately;
-   they can change it under **Settings → Account**.
+   they can change it under **Settings → Account**. For anyone using a managed
+   Plex Home profile, use **Link Plex profile** there (see Plex below).
 
-Leerr recognises albums in Jellyfin by their **MusicBrainz release-group id**.
-Turn on tag writing in Lidarr (Settings → Metadata) or let Jellyfin's
-MusicBrainz plugin fill it in; albums without it never show as arrived, and the
-Requests page says how many there are. Requesting EPs, live albums or
-compilations only works if Lidarr's metadata profile allows those types.
+Requesting EPs, live albums or compilations only works if Lidarr's metadata
+profile allows those types.
+
+## Plex
+
+**The address.** Leerr only talks to services over HTTPS. Every claimed Plex
+server already has a certificate for its own `plex.direct` names, of the form
+`https://<IP address with dashes>.<certificate id>.plex.direct:32400`. The
+certificate names its id; on the Plex machine:
+
+```sh
+openssl s_client -connect 127.0.0.1:32400 </dev/null 2>/dev/null | openssl x509 -noout -subject
+# subject=CN=*.0123456789abcdef0123456789abcdef.plex.direct
+```
+
+When Leerr runs directly on the Plex machine (the Nix package or plain Node),
+use the loopback name, `https://127-0-0-1.<certificate id>.plex.direct:32400`;
+on another machine, the LAN address's name (e.g.
+`https://192-168-1-10.<certificate id>.plex.direct:32400`). In **Docker**,
+127.0.0.1 is the container itself: on the Plex machine use the compose
+network's gateway, `https://10-213-47-1.<certificate id>.plex.direct:32400`
+(change it with the subnet in `compose.yaml`), or the LAN name. Plex must listen
+on that interface and the firewall must let the Docker bridge reach port 32400.
+
+These names resolve through public DNS; to keep playback independent of it, pin
+the name to its address. On NixOS, for the Nix package:
+`networking.hosts."127.0.0.1" = [ "127-0-0-1.<certificate id>.plex.direct" ];`.
+A container does not see the host's pins: use `extra_hosts` in
+`compose.override.yaml` instead (see `compose.override.example.yaml`). A
+reverse proxy with its own HTTPS name works too.
+
+The address must be that name, with the exact id. `https://127.0.0.1:32400`,
+`https://localhost:32400` or `https://<LAN IP>:32400` fail with
+`ERR_TLS_CERT_ALTNAME_INVALID` ("its certificate is for a different name"):
+Plex's certificate only covers `*.<certificate id>.plex.direct`, and no extra CA
+can change that.
+
+Saving checks the address: the server must be claimed, and Leerr remembers
+which server answered. If the address later answers as a different server,
+Leerr sends nobody's sign-in there (Settings → Status says so); saving an
+address that answers as a different server, on purpose, removes every Plex
+link. Clearing the address switches Plex off for everyone but keeps the links,
+so saving the same server again brings everything back.
+
+Do not add Leerr's address to Plex's "List of IP addresses and networks that
+are allowed without auth" (Settings → Network): requests from there run as the
+server's owner, so everyone would see the owner's library.
+
+**Signing in.** Each person signs in with their own Plex account on Plex's page
+(Settings → Connections → Sign in with Plex), and Plex sends them back. People
+the server is shared with only see what is shared with them. A **managed Home
+profile** (one without its own Plex account, often a child's) is linked by a
+Leerr administrator who is a full member of the Plex Home, on their own device:
+**Settings → Users → Link Plex profile** for that person, approve on Plex's
+page, then pick the profile. Only there: whoever sees the Home's profile list
+picks from it, and a profile without a Plex PIN needs nothing more. Giving each
+managed profile a Plex PIN means a profile can only be linked by someone who
+knows it.
+
+Never sign in to Plex as a full member on someone else's device: Plex's sign-in
+page keeps that browser signed in, and later offers your account with one tap,
+without a password or a Home PIN. If it happened, sign out at
+<https://app.plex.tv> on that device. Give the Home administrator a Plex PIN
+too: without one, anyone signed in to any Home profile can switch to the
+administrator in Plex's own apps. One Plex account or profile can be linked to
+only one Leerr user; Settings → Users shows who plays as whom, and **Unlink
+Plex** there frees a profile linked to the wrong person.
+
+**Recognising arrived albums.** Plex's music agent names each album's
+MusicBrainz *release*. Leerr looks up the release group (requests are by release
+group) on MusicBrainz and remembers it, so a new library takes a few minutes to
+be fully recognised. Albums Plex has not matched (Plex Web shows them as
+unmatched) cannot be recognised: use **Fix Match** in Plex, and turn on
+"Tag Audio Files with Metadata" in Lidarr (Settings → Metadata) so Plex finds
+the right release. When a requested album has arrived but Plex has not matched
+it to that album, the Requests page says so and links to it, so it can be
+played and fixed.
+
+**Scanning after Lidarr imports.** Leerr never asks Plex to scan. Either add
+Lidarr's **Plex Media Server** connection (Lidarr → Settings → Connect, with
+"Update Library", "On Release Import" and "On Upgrade"; map paths if Lidarr and
+Plex see the music folder at different paths), or turn on Plex's "Scan my
+library automatically" (Settings → Library). Lidarr's connection only fires for
+downloaded albums, not for manual imports or rescans, so the automatic or
+periodic scan is a useful backstop.
+
+**Formats.** FLAC, MP3, AAC, Opus, Vorbis and WAV stream as they are. Plex
+converts others (ALAC, AIFF, WMA, APE, …) to MP3 for the browser; that needs no Plex
+Pass.
 
 ## Notifications
 
@@ -179,11 +270,14 @@ certificate itself (one file can hold several). Node reads it only at startup.
   and mount the file read-only (it must be readable by UID 1000).
 - systemd: add `Environment=NODE_EXTRA_CA_CERTS=/etc/leerr/ca.pem`.
 
-Saving the Jellyfin address does not contact Jellyfin. A certificate that
-still does not verify shows up as "Lidarr could not be reached
-(UNABLE_TO_GET_ISSUER_CERT_LOCALLY): its certificate is not trusted…" (or a
-similar code) when saving Lidarr, when someone connects Jellyfin under
-**Settings → Connections**, and on **Settings → Status**.
+A certificate that still does not verify shows up as "Lidarr could not be
+reached (UNABLE_TO_GET_ISSUER_CERT_LOCALLY): its certificate is not trusted…"
+(or a similar code) when saving the Lidarr or Plex address, and on **Settings →
+Status**. Plex's own `plex.direct` certificates are public and need nothing.
+A name error (`ERR_TLS_CERT_ALTNAME_INVALID`, "its certificate is for a
+different name") means the address does not match the certificate:
+`NODE_EXTRA_CA_CERTS` cannot fix that, use the name the certificate was issued
+for (for Plex, its `plex.direct` name).
 
 ## Day to day
 
@@ -194,11 +288,12 @@ similar code) when saving Lidarr, when someone connects Jellyfin under
   requests**. Leerr never automatically repeats a change whose outcome is unknown.
 - **Failed requests** (search failed, or nothing grabbed within a day) can be
   retried by the person who requested them or by an administrator.
-- **Settings → Status** shows whether Jellyfin and Lidarr answer, the worker's
+- **Settings → Status** shows whether Plex and Lidarr answer, the worker's
   last pass and problem, request counts, open streams and the last backup.
 - **Logs** are JSON lines on stdout, for example `login_failed`,
   `user_updated`, `upstream_error`, `acquisition_upstream_error`,
-  `notification_failed`, `backup_failed`, `startup_failed` and
+  `notification_failed`, `plex_token_rejected`, `plex_token_renewed`,
+  `release_lookup_failed`, `backup_failed`, `startup_failed` and
   `internal_error`. They contain no secrets.
 
 ## Backups
@@ -277,8 +372,9 @@ database it started from next to it (`leerr.sqlite.v<old version>-<id>.bak`).
 Release notes are in [CHANGELOG.md](../CHANGELOG.md); read them before
 upgrading.
 
-Upgrading to 0.3 asks everyone to reconnect Jellyfin once: Leerr now signs in as
-a separate Jellyfin device per person. Docker deployments also need
+Upgrading to 0.3 moves Leerr from Jellyfin to Plex: enter the Plex address under
+Settings → Server, and everyone signs in with Plex under Settings → Connections.
+Saved Jellyfin sign-ins are deleted. Docker deployments also need
 `LEERR_TRUST_PROXY=10.213.47.1` and a `.env` that points at the existing key
 (see the changelog).
 
@@ -305,5 +401,5 @@ release.
 
 Schema versions 1–2 are not migrated. Leerr refuses to start on them rather than
 touch them. Move the old data directory aside, keeping it as a backup, and start
-with an empty one: set up the administrator again, and have each person reconnect
-Jellyfin. The encryption key can be reused or replaced.
+with an empty one: set up the administrator again, and have each person sign in
+with Plex. The encryption key can be reused or replaced.

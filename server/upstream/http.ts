@@ -19,6 +19,8 @@ export type JsonResponse = { status: number; body: JsonValue };
 const notSentCodes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
 // Certificate checks and TLS handshakes finish before any HTTP bytes are written.
 const certificateCode = /CERT|^INVALID_CA$|^HOSTNAME_MISMATCH$|^ERR_TLS_/;
+/** A trusted certificate for another name: no extra CA can fix that, only the right address. */
+const nameMismatchCode = /^ERR_TLS_CERT_ALTNAME_INVALID$|^HOSTNAME_MISMATCH$/;
 const handshakeCode = /^ERR_SSL_/;
 const causeCode = z.object({
   cause: z.object({ code: z.string() }).loose(),
@@ -32,7 +34,9 @@ function transportError(cause: unknown, service: string): UpstreamError {
   return new UpstreamError(
     "upstream_unavailable",
     503,
-    certificate
+    nameMismatchCode.test(code)
+      ? `${service} could not be reached (${code}): its certificate is for a different name than this address. Use the name on the certificate (for Plex, the server's plex.direct address); see the deployment guide.`
+      : certificate
       ? `${service} could not be reached (${code}): its certificate is not trusted. See NODE_EXTRA_CA_CERTS in the deployment guide.`
       : notSent
         ? `${service} could not be reached (${code}).`

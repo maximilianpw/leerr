@@ -4,7 +4,7 @@ import type { Store } from "./store.ts";
 import type { Notification, Upstreams } from "./upstream/index.ts";
 
 const wording: Record<StatusChange["status"], (title: string) => { title: string; detail: string }> = {
-  imported: (title) => ({ title: `${title} is ready`, detail: "Lidarr imported it. It appears in Jellyfin after the next library scan." }),
+  imported: (title) => ({ title: `${title} is ready`, detail: "Lidarr imported it. It appears in Plex after its next library scan." }),
   failed: (title) => ({ title: `${title} could not be downloaded`, detail: "Open Leerr to retry." }),
   attention: (title) => ({ title: `${title} needs attention`, detail: "An administrator should check Lidarr, then retry or remove it in Leerr." }),
 };

@@ -9,7 +9,7 @@ function setup() {
   const store = makeStore();
   const upstream = new FakeUpstreams();
   const clock = new Clock();
-  store.saveSettings({ ...configuredSettings, jellyfinURL: null });
+  store.saveSettings({ ...configuredSettings, plexURL: null, plexMachineID: null });
   const user = store.createUser("alice", "hash", "member", clock.now());
   const { acquisition } = store.request(user.id, identities.album, clock.now());
   const changes: StatusChange[] = [];

@@ -15,7 +15,7 @@ export function quality(track: Track): string {
     .join(" · ");
 }
 
-/** A heart that marks an album or track as a favourite in the person's Jellyfin account. */
+/** A heart that marks an album or track as a favourite: five stars in the person's Plex account, as Plexamp shows. */
 export function FavoriteButton({ itemID, name, initial, compact = false }: { itemID: string; name: string; initial: boolean; compact?: boolean }) {
   const [favorite, setFavorite] = useState(initial);
   const action = useAction();
@@ -79,12 +79,19 @@ export function TrackList({ tracks, showArtistUnless, showAlbum = false }: { tra
           // By id: a mixed or shuffled queue makes positions meaningless.
           const active = player.current?.id === track.id;
           return (
-            <li key={`${index}-${track.id}`} className={`track ${active ? "active" : ""}`}>
+            <li key={`${index}-${track.id}`} className={`track ${active ? "active" : ""} ${track.available ? "" : "trashed"}`}>
               <button
                 type="button"
                 className="trackPlay"
+                disabled={!track.available && !active}
                 onClick={() => (active ? player.controller.toggle() : player.controller.playQueue(tracks, index))}
-                aria-label={active && player.playing ? `Pause ${track.title}` : `Play ${track.title}`}
+                aria-label={
+                  !track.available && !active
+                    ? `${track.title}, in Plex's trash`
+                    : active && player.playing
+                      ? `Pause ${track.title}`
+                      : `Play ${track.title}`
+                }
                 aria-current={active ? "true" : undefined}
               >
                 <span className="trackNumber">
@@ -101,7 +108,9 @@ export function TrackList({ tracks, showArtistUnless, showAlbum = false }: { tra
                 </span>
                 <span className="trackTitle">
                   <b>{track.title}</b>
-                  {(track.artist && track.artist !== showArtistUnless) || (showAlbum && track.albumTitle) ? (
+                  {!track.available ? (
+                    <small>In Plex's trash</small>
+                  ) : (track.artist && track.artist !== showArtistUnless) || (showAlbum && track.albumTitle) ? (
                     <small>{[track.artist !== showArtistUnless ? track.artist : "", showAlbum ? track.albumTitle : ""].filter((part) => part).join(" · ")}</small>
                   ) : null}
                 </span>
@@ -110,7 +119,7 @@ export function TrackList({ tracks, showArtistUnless, showAlbum = false }: { tra
               </button>
               <div className="trackEnd">
                 <FavoriteButton itemID={track.id} name={track.title} initial={track.favorite} compact />
-                <TrackMenu track={track} addToPlaylist={() => setAdding([track])} />
+                {track.available ? <TrackMenu track={track} addToPlaylist={() => setAdding([track])} /> : <span className="trackMenuSpace" />}
               </div>
             </li>
           );
@@ -198,7 +207,7 @@ function TrackMenu({ track, addToPlaylist }: { track: Track; addToPlaylist: () =
   );
 }
 
-/** Picks one of the person's Jellyfin playlists and appends the tracks to it. */
+/** Picks one of the person's Plex playlists and appends the tracks to it. */
 export function AddToPlaylist({ tracks, close }: { tracks: Track[]; close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const playlists = useResource((signal) => request("/playlists", playlistsSchema, { signal }), []);
@@ -218,6 +227,8 @@ export function AddToPlaylist({ tracks, close }: { tracks: Track[]; close: () =>
       setDone(name);
     });
   const subject = tracks.length === 1 ? `“${tracks[0].title}”` : `${tracks.length} tracks`;
+  // Smart playlists fill themselves from rules in Plex; tracks cannot be added to them.
+  const regular = playlists.data?.items.filter((playlist) => !playlist.smart) ?? [];
   return (
     <dialog ref={dialog} className="modal" aria-labelledby="playlist-title" onClose={close}>
       <button type="button" className="iconButton modalClose" aria-label="Close" onClick={() => dialog.current?.close()}>
@@ -232,11 +243,15 @@ export function AddToPlaylist({ tracks, close }: { tracks: Track[]; close: () =>
         <Spinner label="Loading playlists…" />
       ) : playlists.error ? (
         <ErrorBox message={playlists.error} retry={playlists.reload} />
-      ) : !playlists.data?.items.length ? (
-        <p className="muted">You have no playlists yet. Create one in Jellyfin first.</p>
+      ) : !regular.length ? (
+        <p className="muted">
+          {playlists.data?.items.length
+            ? "You only have smart playlists, which Plex fills by itself. Create a regular playlist in Plex or Plexamp first."
+            : "You have no playlists yet. Create one in Plex or Plexamp first."}
+        </p>
       ) : (
         <ul className="rows">
-          {playlists.data.items.map((playlist) => (
+          {regular.map((playlist) => (
             <li key={playlist.id}>
               <span>
                 <b>{playlist.name}</b>

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { hashPassword } from "../passwords.ts";
+import { plexIDs } from "../testing.ts";
 import { harness, ORIGIN, PASSWORD, SETUP_TOKEN } from "./harness.ts";
 
 test("setup is one-shot, token-protected and creates an administrator", async (t) => {
@@ -192,11 +193,11 @@ test("fixture preview refuses credentials however the path is spelled", async (t
   const h = await harness(t, { fixturePreview: true });
   const admin = await h.user("root", "admin");
   h.configure();
-  for (const path of ["/api/v1/connections/jellyfin", "/api/v1/connections/%6Aellyfin"]) {
-    const response = await h.call("PUT", path, admin, { username: "admin", password: "jelly-password" });
+  for (const path of ["/api/v1/connections/plex/links", "/api/v1/connections/%70lex/links"]) {
+    const response = await h.call("POST", path, admin, { mode: "own" });
     assert.equal(response.json().error.code, "fixture_preview");
   }
-  const settings = await h.call("PUT", "/api/v1/admin/settings/%6Aellyfin", admin, { url: "https://other.test" });
+  const settings = await h.call("PUT", "/api/v1/admin/settings/%70lex", admin, { url: "https://other.test" });
   assert.equal(settings.json().error.code, "fixture_preview");
 });
 
@@ -265,8 +266,8 @@ test("a response is withheld if the session is revoked while it is being prepare
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const library = h.upstream.jellyfinLibrary.bind(h.upstream);
-  h.upstream.jellyfinLibrary = async (access, query) => {
+  const library = h.upstream.plexLibrary.bind(h.upstream);
+  h.upstream.plexLibrary = async (access, query) => {
     await held;
     return library(access, query);
   };
@@ -283,8 +284,8 @@ test("signed-in people get their own request budget, so a cover grid cannot bloc
   const h = await harness(t);
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  for (let index = 0; index < 320; index++) await h.call("GET", "/api/v1/artwork/available?size=small", admin);
-  assert.equal((await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: "tone" })).status, 200);
+  for (let index = 0; index < 320; index++) await h.call("GET", `/api/v1/artwork/${plexIDs.album}?size=small`, admin);
+  assert.equal((await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: plexIDs.track })).status, 200);
   const other = await h.user("mia", "member", "member");
   assert.equal((await h.call("GET", "/api/v1/me", other)).status, 200);
 });

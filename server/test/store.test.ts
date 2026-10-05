@@ -10,7 +10,7 @@ import { backupName, backupOnce, newestBackup, nextBackupDelay, pruneBackups, sc
 import { deployment } from "../config.ts";
 import type { Runtime } from "../http/context.ts";
 import { hashPassword, verifyPassword } from "../passwords.ts";
-import { emptySettings, jellyfinSecret, Store } from "../store.ts";
+import { digest, emptySettings, plexSecret, Store } from "../store.ts";
 import { fixtureKey, identities } from "../testing.ts";
 
 /** Runs a short script in a separate process, as a second server or a crashing one would. */
@@ -22,7 +22,7 @@ function script(directory: string, name: string, body: string): string {
 
 /** Rewinds a fresh database to the version-3 schema that earlier releases created. */
 const VERSION_3 =
-  "DROP TABLE devices; DROP INDEX requests_acquisition; ALTER TABLE acquisitions DROP COLUMN pinEdition; ALTER TABLE acquisitions DROP COLUMN notified; ALTER TABLE requests DROP COLUMN seenStatus; PRAGMA user_version = 3;";
+  "DROP TABLE devices; DROP TABLE releaseGroups; DROP INDEX requests_acquisition; ALTER TABLE acquisitions DROP COLUMN pinEdition; ALTER TABLE acquisitions DROP COLUMN notified; ALTER TABLE requests DROP COLUMN seenStatus; ALTER TABLE users DROP COLUMN plexClientID; PRAGMA user_version = 3;";
 
 function temporary(t: { after: (fn: () => void) => void }) {
   const directory = mkdtempSync(join(tmpdir(), "leerr-store-"));
@@ -33,16 +33,16 @@ function temporary(t: { after: (fn: () => void) => void }) {
 test("secrets are bound to their owner and service and a wrong key refuses to start", (t) => {
   const path = join(temporary(t), "leerr.sqlite");
   const store = new Store(path, fixtureKey);
-  store.putSecret("user-1", "jellyfin", JSON.stringify({ token: "t", userID: "u", username: "n" }));
+  store.putSecret("user-1", "plex", JSON.stringify({ accountToken: "t", serverToken: "s", machineID: "m", username: "n", managed: false }));
   const sealed = String(store.db.prepare("SELECT value FROM secrets").pluck().get());
-  assert.throws(() => store.decrypt("user-2", "jellyfin", sealed), "bound to the owner");
+  assert.throws(() => store.decrypt("user-2", "plex", sealed), "bound to the owner");
   assert.throws(() => store.decrypt("user-1", "lastfm", sealed), "bound to the service");
   // Truncated authentication tags are rejected outright.
-  assert.throws(() => store.decrypt("user-1", "jellyfin", Buffer.from(sealed, "base64").subarray(0, 20).toString("base64")));
+  assert.throws(() => store.decrypt("user-1", "plex", Buffer.from(sealed, "base64").subarray(0, 20).toString("base64")));
   store.close();
   assert.throws(() => new Store(path, Buffer.alloc(32, 9)), /encryption key does not match this database/);
   const reopened = new Store(path, fixtureKey);
-  assert.equal(reopened.secret("user-1", "jellyfin", jellyfinSecret)?.token, "t");
+  assert.equal(reopened.secret("user-1", "plex", plexSecret)?.accountToken, "t");
   reopened.close();
 });
 
@@ -66,13 +66,20 @@ test("a version-3 database is upgraded in place, keeping its data and a copy of 
   const user = store.createUser("alice", "hash", "member", 0);
   const { acquisition } = store.request(user.id, identities.album, 0);
   store.createSession(user.id, "web", "Browser", 0, 60_000);
+  // A version-3 database belongs to the Jellyfin era.
+  store.db.prepare("INSERT INTO secrets(owner,service,value) VALUES(?,?,?)").run(user.id, "jellyfin", store.encrypt(user.id, "jellyfin", "{}"));
+  const session = store.createSession(user.id, "web", "Browser", 0, 60_000);
+  store.createTicket(digest(session.token), "jellyfin-item", 60_000);
   store.db.exec(VERSION_3);
   store.close();
   const upgraded = new Store(path, fixtureKey);
+  assert.equal(upgraded.db.prepare("SELECT COUNT(*) FROM secrets WHERE service='jellyfin'").pluck().get(), 0, "Jellyfin sign-ins are dropped");
+  assert.equal(upgraded.db.prepare("SELECT COUNT(*) FROM tickets").pluck().get(), 0, "so are tickets for Jellyfin items");
+  assert.match(upgraded.plexClientID(user.id), /^leerr-[0-9a-f]{32}$/);
   assert.equal(upgraded.db.pragma("user_version", { simple: true }), 4);
   assert.equal(upgraded.acquisition(acquisition.id)?.pinEdition, false);
   assert.equal(upgraded.requests(user.id).length, 1, "rows survive; no cascade fired");
-  assert.equal(upgraded.sessions(user.id, 0).length, 1);
+  assert.equal(upgraded.sessions(user.id, 0).length, 2);
   assert.ok(upgraded.createDevice(user.id, 0));
   upgraded.close();
   const copies = readdirSync(directory).filter((file) => /^leerr\.sqlite\.v3-[0-9a-f]{8}\.bak$/.test(file));
@@ -133,7 +140,7 @@ test("operator commands reset passwords, back up, and rotate keys offline", asyn
   const user = store.createUser("alice", await hashPassword("old password!"), "member", 0);
   store.updateUser(user.id, { disabled: true });
   store.createSession(user.id, "web", "Browser", Date.now(), 60_000);
-  store.putSecret(user.id, "jellyfin", JSON.stringify({ token: "t", userID: "u", username: "n" }));
+  store.putSecret(user.id, "plex", JSON.stringify({ accountToken: "t", serverToken: "s", machineID: "m", username: "n", managed: false }));
   store.close();
   const operator = (args: string[], input = "", key = keyFile) =>
     spawnSync(process.execPath, ["server/operator.ts", ...args], {
@@ -154,7 +161,7 @@ test("operator commands reset passwords, back up, and rotate keys offline", asyn
   assert.equal(alice.disabled, false);
   assert.equal(await verifyPassword(alice.password, "brand new password"), true);
   assert.equal(after.sessions(alice.id, Date.now()).length, 0);
-  assert.equal(after.secret(alice.id, "jellyfin", jellyfinSecret)?.token, "t");
+  assert.equal(after.secret(alice.id, "plex", plexSecret)?.accountToken, "t");
   after.close();
   // The backup predates rotation and still opens with the old key.
   new Store(join(directory, "backup.sqlite"), fixtureKey).close();
@@ -392,7 +399,7 @@ test("a wrong key leaves an older database exactly as it was", (t) => {
   const directory = temporary(t);
   const path = join(directory, "leerr.sqlite");
   const store = new Store(path, fixtureKey);
-  store.putSecret("user-1", "jellyfin", JSON.stringify({ token: "t", userID: "u", username: "n" }));
+  store.putSecret("user-1", "plex", JSON.stringify({ accountToken: "t", serverToken: "s", machineID: "m", username: "n", managed: false }));
   store.db.exec(VERSION_3);
   store.close();
   assert.throws(() => new Store(path, Buffer.alloc(32, 9)), /encryption key does not match/);

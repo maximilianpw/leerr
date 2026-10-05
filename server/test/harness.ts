@@ -4,7 +4,7 @@ import { buildApp, type AppOptions } from "../http/app.ts";
 import { hashPassword } from "../passwords.ts";
 import type { LogFields } from "../log.ts";
 import type { Role } from "../store.ts";
-import { Clock, configuredSettings, FakeUpstreams, makeStore } from "../testing.ts";
+import { Clock, configuredSettings, FakeUpstreams, makeStore, plexLinkFor } from "../testing.ts";
 import type { JsonValue } from "../upstream/http.ts";
 
 export const ORIGIN = "https://leerr.test";
@@ -54,14 +54,10 @@ export async function harness(t: TestContext, options: Partial<AppOptions> = {})
     return { status: response.statusCode, headers: response.headers, body: response.body, json: () => response.json() };
   }
 
-  async function user(username: string, role: Role = "member", jellyfin?: "admin" | "member"): Promise<Client> {
+  /** A Leerr user, optionally already linked to the fixture Plex account `plex`. */
+  async function user(username: string, role: Role = "member", plex?: "admin" | "member"): Promise<Client> {
     const created = store.createUser(username, await hashPassword(PASSWORD), role, clock.now());
-    if (jellyfin)
-      store.putSecret(
-        created.id,
-        "jellyfin",
-        JSON.stringify({ ...upstream.logins.get(jellyfin), username: jellyfin }),
-      );
+    if (plex) store.putSecret(created.id, "plex", JSON.stringify(plexLinkFor(plex)));
     return login(username);
   }
 

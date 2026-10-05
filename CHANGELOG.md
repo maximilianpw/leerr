@@ -2,10 +2,18 @@
 
 ## 0.3.0 (unreleased)
 
+**Leerr now uses Plex instead of Jellyfin.** Library, playback, favourites,
+playlists and "is it in my library yet" all come from a Plex Media Server; each
+person signs in with their own Plex account on Plex's page (managed Home
+profiles are linked by a Home member). Jellyfin support is gone: after
+upgrading, an administrator enters the Plex server's HTTPS address under
+Settings → Server and everyone signs in with Plex under Settings → Connections.
+Saved Jellyfin sign-ins are deleted, and queues saved in browsers start empty.
+API names changed accordingly (`/connections/plex/links`, `/admin/settings/plex`,
+`plex*` fields and error codes).
+
 The database upgrades itself from 0.2 (schema 3 to 4) on first start and keeps
-a copy of the original next to it (`leerr.sqlite.v3-*.bak`). Everyone
-reconnects Jellyfin once: Leerr now signs in as a separate Jellyfin device per
-person.
+a copy of the original next to it (`leerr.sqlite.v3-*.bak`).
 
 **Docker deployments, before upgrading:**
 
@@ -46,14 +54,13 @@ database still opens in 0.2. See [rolling back](docs/deployment.md#rolling-back)
   the next one is due a full period after the newest.
 - A private CA's certificate problem now says so (and points to
   `NODE_EXTRA_CA_CERTS`) instead of "did not respond in time".
-- Connecting a shared Jellyfin account no longer signs another person out.
 - Cover grids no longer use up the rate limit that playback needs.
 - The Library page no longer shows the previous person's albums after
   sign-out, and refreshes when you come back to it.
 - Saving only the Lidarr key no longer clears the root folder and profiles.
 - Many player fixes: the old track stops at once, recovery works more than
   once, the seek bar no longer snaps back, real error messages, and the seek
-  bar and Previous button on phones. Jellyfin hears "stopped" for the track
+  bar and Previous button on phones. Plex hears "stopped" for the track
   that was actually playing, also when signing out; Shuffle starts anywhere.
 - Accessibility: focus on route changes and dialogs, announced player errors,
   page titles, contrast; keyboard focus survives tabs, queue reordering,
@@ -64,10 +71,17 @@ database still opens in 0.2. See [rolling back](docs/deployment.md#rolling-back)
 - Members can change their own password and withdraw their own requests.
 - Known-device sign-in: strangers' guesses no longer lock out an account's
   owner, including everyone who shares a browser.
-- Library sorting, "Recently added", artists, favourites and Jellyfin playlists.
+- Plex: sign-in on Plex's page, per-person libraries, managed Home profiles
+  (linked by an administrator from Settings → Users, who can also unlink
+  anyone), formats browsers cannot play (ALAC, AIFF) converted by Plex, and
+  matching albums to requests by their MusicBrainz release. Each Plex account
+  or profile belongs to one Leerr user, albums and tracks in Plex's trash are
+  marked and never queued, and a requested album Plex has not matched is
+  pointed at on the Requests page.
+- Library sorting, "Recently added", artists, favourites and playlists.
 - Queue: play next, add to queue, reorder, shuffle and repeat; the queue and
   position survive a reload.
-- Playback is reported to Jellyfin (play counts, scrobbler plugins).
+- Playback is reported to Plex ("now playing", play counts, history).
 - An installation-wide Last.fm key; suggestions from your own library.
 - Artist pages by release type, and "New from your artists".
 - Notifications to ntfy, Discord or a JSON webhook.

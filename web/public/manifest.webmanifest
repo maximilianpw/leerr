@@ -1,7 +1,7 @@
 {
   "name": "Leerr",
   "short_name": "Leerr",
-  "description": "Discover, request and play music from your household's Jellyfin library.",
+  "description": "Discover, request and play music from your household's Plex library.",
   "start_url": "/discover",
   "scope": "/",
   "display": "standalone",

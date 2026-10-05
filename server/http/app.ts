@@ -15,6 +15,7 @@ import { LiveUpstreams, UpstreamError, type Upstreams } from "../upstream/index.
 import { Auth, LoginThrottle } from "./auth.ts";
 import type { AppContext, Runtime } from "./context.ts";
 import { APIError } from "./errors.ts";
+import { PlexLinks } from "./plexlinks.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { connectionRoutes } from "./routes/connections.ts";
 import { discoverRoutes } from "./routes/discover.ts";
@@ -66,10 +67,14 @@ export async function buildApp(options: AppOptions) {
     log,
     auth: new Auth(options.store, now, secure),
     logins: new LoginThrottle(now),
-    jellyfinLogins: new LoginThrottle(now, 5),
     passwordChecks: new LoginThrottle(now, 5),
     streams: new StreamRegistry(4),
-    library: new LibraryIndex(upstream, now),
+    library: new LibraryIndex(upstream, options.store, now, log),
+    plexLinks: new PlexLinks(),
+    plexRenewals: new Map(),
+    plexRenewing: new Map(),
+    plexChecks: new Map(),
+    origin: origin.origin,
     reconciler: new Reconciler(options.store, upstream, now, log, notificationListener(options.store, upstream, log)),
     runtime: options.runtime ?? { startedAt: now(), lastBackup: null },
     setupToken: options.setupToken,

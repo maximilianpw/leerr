@@ -450,7 +450,9 @@ fieldset:disabled button {
   align-items: start;
 }
 
-.formGrid > fieldset {
+.formGrid > fieldset,
+.formGrid > .error,
+.formGrid > .rowActions {
   grid-column: 1 / -1;
 }
 
@@ -821,6 +823,14 @@ fieldset:disabled button {
   background: #15803d;
 }
 
+.artBadge.trashed {
+  background: #57534e;
+}
+
+.artCard.trashed .artwork {
+  opacity: 0.45;
+}
+
 .artBadge.favorite {
   right: 8px;
   left: auto;
@@ -1143,6 +1153,29 @@ fieldset:disabled button {
 
 .trackPlay:hover {
   background: var(--surface);
+}
+
+.track.trashed .trackPlay {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.track.trashed .trackPlay:hover {
+  background: transparent;
+}
+
+.track.trashed .trackPlay .hoverPlay {
+  display: none;
+}
+
+.track.trashed .trackPlay .number {
+  display: inline;
+}
+
+/* Keeps the heart in line with rows that have a menu. */
+.trackMenuSpace {
+  width: 38px;
+  flex-shrink: 0;
 }
 
 .track.active .trackPlay {
@@ -2093,4 +2126,29 @@ main.centered {
   .bottomNav .navLink {
     padding-block: 4px;
   }
+}
+
+/* Picking a managed Plex Home profile. */
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.choice input {
+  width: auto;
+  accent-color: var(--accent-hot);
+}
+
+fieldset > legend {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.notice .spin {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
 }

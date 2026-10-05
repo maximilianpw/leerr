@@ -5,7 +5,9 @@ import { markRequestsSeen, useAction, useResource } from "../hooks.ts";
 import { Link } from "../router.tsx";
 import { Artwork, ErrorBox, formatRelative, Notice, Progress, SectionState, StatusBadge, Title } from "../ui.tsx";
 
-const inProgress = (item: RequestItem) => item.status === "requested" || item.status === "acquiring" || item.status === "imported";
+// An album in Plex that Plex did not match changes only when someone fixes it there.
+const inProgress = (item: RequestItem) =>
+  item.status === "requested" || item.status === "acquiring" || (item.status === "imported" && !item.unmatchedAlbumID);
 
 export function RequestsPage() {
   const requests = useResource((signal) => request("/requests", requestsSchema, { signal }), []);
@@ -28,8 +30,9 @@ export function RequestsPage() {
   }, [requests.data]);
 
   const library = requests.data?.library;
-  const jellyfin = connections.data;
-  const waitingForJellyfin = items.some((item) => item.status === "imported");
+  const plex = connections.data;
+  const waitingForPlex = items.some((item) => item.status === "imported" && !item.unmatchedAlbumID);
+  const unmatched = items.filter((item) => item.unmatchedAlbumID).length;
   return (
     <div className="page">
       <Title text="Requests" />
@@ -42,29 +45,35 @@ export function RequestsPage() {
           <RefreshCw aria-hidden="true" className={requests.loading ? "spin" : ""} /> Refresh
         </button>
       </header>
-      {jellyfin && !jellyfin.jellyfin ? (
+      {plex && !plex.plex ? (
         <Notice>
-          {jellyfin.jellyfinConfigured ? (
+          {plex.plexConfigured ? (
             <>
-              <Link to="/settings">Connect your Jellyfin account</Link> to play albums and see when requests arrive.
+              <Link to="/settings">Sign in with Plex</Link> to play albums and see when requests arrive.
             </>
           ) : (
-            "An administrator needs to set up the Jellyfin server before requests can show as ready to play."
+            "An administrator needs to set up the Plex server before requests can show as ready to play."
           )}
         </Notice>
-      ) : jellyfin?.jellyfinValid === false ? (
+      ) : plex?.plexValid === false ? (
         <Notice>
-          Jellyfin no longer accepts your saved sign-in. <Link to="/settings">Reconnect Jellyfin</Link> to see which requests have arrived.
+          Plex no longer accepts your saved sign-in. <Link to="/settings">Sign in to Plex again</Link> to see which requests have arrived.
         </Notice>
       ) : requests.data && !requests.data.libraryChecked ? (
-        <Notice>Your Jellyfin library couldn't be checked, so albums that have arrived may not show as ready yet.</Notice>
-      ) : library && library.unmatched > 0 && waitingForJellyfin ? (
+        <Notice>Your Plex library couldn't be checked, so albums that have arrived may not show as ready yet.</Notice>
+      ) : unmatched > 0 ? (
         <Notice>
-          {library.unmatched} of {library.albums} albums in your Jellyfin library have no MusicBrainz release-group ID, so Leerr can't
-          tell when some requests arrive. Ask an administrator to turn on tag writing in Lidarr or refresh metadata in Jellyfin.
+          {unmatched === 1 ? "One requested album is" : `${unmatched} requested albums are`} in your Plex library, but Plex hasn't matched{" "}
+          {unmatched === 1 ? "it" : "them"} to the album that was requested, so {unmatched === 1 ? "it can't show" : "they can't show"} as
+          ready. You can already play {unmatched === 1 ? "it" : "them"}. An administrator can fix this with Fix Match in Plex.
+        </Notice>
+      ) : library && library.unmatched > 0 && waitingForPlex ? (
+        <Notice>
+          {library.unmatched} of {library.albums} albums in your Plex library aren't matched to MusicBrainz, so Leerr can't tell when some
+          requests arrive. An administrator can use Fix Match on them in Plex, or turn on tag writing in Lidarr.
         </Notice>
       ) : null}
-      {jellyfin && !jellyfin.lidarrReady && (
+      {plex && !plex.lidarrReady && (
         <Notice>Lidarr isn't fully set up yet, so new requests wait until an administrator finishes it.</Notice>
       )}
       <SectionState
@@ -94,6 +103,7 @@ function RequestRow({ item, changed }: { item: RequestItem; changed: () => void 
   const retry = useAction();
   const withdraw = useAction();
   const cover = item.albumID ? artworkURL(item.albumID, "small") : coverArtURL("release", item.releaseMBID);
+  const playable = item.albumID ?? item.unmatchedAlbumID;
   const remove = () => {
     if (
       !confirm(
@@ -114,6 +124,7 @@ function RequestRow({ item, changed }: { item: RequestItem; changed: () => void 
         <span>{item.artist}</span>
         <Progress status={item.status} />
         {item.reason && <small className={item.retryable ? "reason problem" : "reason"}>{item.reason}</small>}
+        {item.unmatchedAlbumID && <small className="reason">In your Plex library, but Plex hasn't matched it to this album yet.</small>}
         {retry.error && <ErrorBox message={retry.error} />}
         {withdraw.error && <ErrorBox message={withdraw.error} />}
       </div>
@@ -137,8 +148,8 @@ function RequestRow({ item, changed }: { item: RequestItem; changed: () => void 
           >
             <RotateCcw aria-hidden="true" /> {retry.pending ? "Retrying…" : "Retry"}
           </button>
-        ) : item.albumID ? (
-          <Link to={`/albums/${encodeURIComponent(item.albumID)}`} className="secondary" label={`Open ${item.title}`}>
+        ) : playable ? (
+          <Link to={`/albums/${encodeURIComponent(playable)}`} className="secondary" label={`Open ${item.title}`}>
             Open <ChevronRight aria-hidden="true" />
           </Link>
         ) : null}

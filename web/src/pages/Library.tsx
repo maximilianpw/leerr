@@ -25,7 +25,7 @@ const views: Array<{ id: LibraryView; label: string; to: string }> = [
   { id: "artists", label: "Artists", to: "/library/artists" },
   { id: "playlists", label: "Playlists", to: "/library/playlists" },
 ];
-const notConnected = new Set(["jellyfin_not_connected", "jellyfin_not_configured", "jellyfin_reconnect"]);
+const notConnected = new Set(["plex_not_connected", "plex_not_configured", "plex_reconnect", "plex_wrong_server"]);
 
 export function LibraryPage({ view }: { view: LibraryView }) {
   return (
@@ -106,7 +106,7 @@ function Albums() {
           <p>
             {first.data
               ? `${total} ${total === 1 ? describe.replace("albums", "album") : describe}${q ? ` matching “${q}”` : ""}.`
-              : "Your Jellyfin albums."}
+              : "Your Plex albums."}
           </p>
         </div>
         <form className="search" role="search" onSubmit={submit}>
@@ -159,7 +159,7 @@ function Albums() {
               "Mark albums as favourites with the heart on an album page."
             ) : (
               <>
-                Albums in your Jellyfin library appear here. <Link to="/settings">Check your Jellyfin connection</Link>.
+                Albums in your Plex music library appear here. <Link to="/settings">Check your Plex sign-in</Link>.
               </>
             )
           }
@@ -233,8 +233,9 @@ function AlbumGrid({ items }: { items: Album[] }) {
     <ul className="artGrid">
       {items.map((album) => (
         <li key={album.id}>
-          <Link to={`/albums/${encodeURIComponent(album.id)}`} className="artCard">
+          <Link to={`/albums/${encodeURIComponent(album.id)}`} className={`artCard ${album.available ? "" : "trashed"}`}>
             <Artwork sources={album.hasArtwork ? [artworkURL(album.id, "medium")] : []} />
+            {!album.available && <span className="artBadge trashed">In Plex's trash</span>}
             {album.favorite && (
               <span className="artBadge favorite" aria-label="Favourite">
                 <Heart aria-hidden="true" />
@@ -320,7 +321,7 @@ function Artists() {
           retry={artists.reload}
           stale
           emptyTitle={q ? "No matches" : "No artists yet"}
-          emptyText={q ? "No album artist matches that name." : "Album artists in your Jellyfin library appear here."}
+          emptyText={q ? "No album artist matches that name." : "Album artists in your Plex library appear here."}
         >
           <ul className="artistList">
             {items.map((artist) => (
@@ -350,7 +351,7 @@ function Playlists() {
       <header className="top">
         <div>
           <h1 tabIndex={-1}>Playlists</h1>
-          <p>Your Jellyfin music playlists.</p>
+          <p>Your Plex music playlists.</p>
         </div>
       </header>
       {playlists.error && !playlists.data ? (
@@ -363,7 +364,7 @@ function Playlists() {
           retry={playlists.reload}
           stale
           emptyTitle="No playlists yet"
-          emptyText="Add tracks to a playlist from an album page, or create playlists in Jellyfin."
+          emptyText="Add tracks to a playlist from an album page, or create playlists in Plex or Plexamp."
         >
           <ul className="artistList">
             {items.map((playlist) => (
@@ -373,7 +374,11 @@ function Playlists() {
                   <span>
                     <b>{playlist.name}</b>
                     <small>
-                      {[playlist.tracks === null ? "" : `${playlist.tracks} ${playlist.tracks === 1 ? "track" : "tracks"}`, playlist.duration ? formatDuration(playlist.duration) : ""]
+                      {[
+                        playlist.smart ? "Smart playlist" : "",
+                        playlist.tracks === null ? "" : `${playlist.tracks} ${playlist.tracks === 1 ? "track" : "tracks"}`,
+                        playlist.duration ? formatDuration(playlist.duration) : "",
+                      ]
                         .filter((part) => part)
                         .join(" · ")}
                     </small>

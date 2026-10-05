@@ -60,7 +60,7 @@ in
     '';
 
     meta = {
-      description = "Self-hosted music discovery, requests and playback for Jellyfin and Lidarr";
+      description = "Self-hosted music discovery, requests and playback for Plex and Lidarr";
       mainProgram = "leerr";
       platforms = ["x86_64-linux"];
     };

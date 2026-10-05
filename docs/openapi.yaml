@@ -13,12 +13,12 @@ info:
     Every error has the body `{"error": {"code": "...", "message": "..."}}`;
     messages are written for end users. A 401 always means the Leerr session
     ended; problems with a connected service use other statuses (for example
-    409 `jellyfin_reconnect` when Jellyfin no longer accepts the saved sign-in).
+    409 `plex_reconnect` when Plex no longer accepts the saved sign-in).
 
     Rate limits: signed-in requests share a budget of 300 per minute per person,
     except artwork (3000 per minute) and streams (6000 per minute). Password
-    changes and Jellyfin sign-ins are also limited per person (10 per 15
-    minutes each, on top of their wrong-password locks). Requests without a
+    changes are also limited per person (10 per 15 minutes, on top of their
+    wrong-password lock), and so are Plex sign-ins (10 per 15 minutes). Requests without a
     session are limited per client address: sign-in 10 and setup 5 per 15
     minutes. A 429 message and its `Retry-After` header give the real wait.
 servers:
@@ -221,10 +221,19 @@ paths:
                       allOf:
                         - $ref: "#/components/schemas/User"
                         - type: object
-                          required: [disabled, createdAt]
+                          required: [disabled, createdAt, plex]
                           properties:
                             disabled: { type: boolean }
                             createdAt: { type: string, format: date-time }
+                            plex:
+                              description: The Plex account or managed profile this person plays as, or null.
+                              oneOf:
+                                - type: "null"
+                                - type: object
+                                  required: [username, managed]
+                                  properties:
+                                    username: { type: string }
+                                    managed: { type: boolean }
         "403": { $ref: "#/components/responses/Error" }
     post:
       tags: [Administration]
@@ -288,7 +297,8 @@ paths:
               schema:
                 type: object
                 required:
-                  - jellyfinURL
+                  - plexURL
+                  - plexSection
                   - lidarrURL
                   - lidarrConfigured
                   - lidarrReady
@@ -300,7 +310,10 @@ paths:
                   - notifyFormat
                   - notifyTokenSet
                 properties:
-                  jellyfinURL: { type: [string, "null"] }
+                  plexURL: { type: [string, "null"] }
+                  plexSection:
+                    type: [string, "null"]
+                    description: The Plex music library Leerr browses; null uses the server's Plex Music library.
                   lidarrURL: { type: [string, "null"] }
                   lidarrConfigured: { type: boolean, description: An address and API key are saved. }
                   lidarrReady: { type: boolean, description: A root folder and both profiles are chosen too, so albums can be added. }
@@ -314,11 +327,23 @@ paths:
                   notifyFormat: { $ref: "#/components/schemas/NotifyFormat" }
                   notifyTokenSet: { type: boolean }
 
-  /api/v1/admin/settings/jellyfin:
+  /api/v1/admin/settings/plex:
     put:
       tags: [Administration]
-      summary: Set the Jellyfin server URL (empty to clear)
-      description: A different server forgets every user's Jellyfin token and stops all streams.
+      summary: Set the Plex Media Server address (empty to switch Plex off)
+      description: |
+        The address must be HTTPS and match the server's certificate, for
+        example its `https://<ip-with-dashes>.<id>.plex.direct:32400` name.
+        Leerr asks the server who it is (`/identity`): it must be claimed (409
+        `plex_unclaimed` otherwise), and its machine identifier is pinned.
+        Nobody's Plex token is ever sent to a different machine: saving an
+        address that answers as a different server forgets every link and
+        stops all streams, and if the address later answers as another
+        machine, calls fail with 409 `plex_wrong_server`. An empty address
+        switches Plex off for everyone but keeps the pinned server and
+        everyone's link, so saving the same server again restores them. An
+        address that cannot be reached gets 503; one that redirects, is not a
+        Plex server or refuses `/identity` gets 502.
       requestBody:
         required: true
         content:
@@ -327,6 +352,96 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Empty" }
         "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/users/{id}/plex/links:
+    post:
+      tags: [Administration]
+      summary: Link one of the Plex Home's managed profiles for this person
+      description: |
+        The only way to link a managed profile (one without its own Plex
+        sign-in): whoever sees the Home's profile list chooses from it, so it
+        happens in the administrator's session. An administrator who is a full
+        member of the Plex Home signs in on Plex's page on their own device,
+        then picks the profile with
+        `POST /api/v1/connections/plex/links/{id}/profile`. The link becomes
+        this person's. Plex returns to Settings → Users. Limited to 10 per 15
+        minutes per administrator; 502 or 503 when plex.tv cannot create the
+        sign-in.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/PlexLinkStarted" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/users/{id}/plex:
+    delete:
+      tags: [Administration]
+      summary: Remove this person's Plex link
+      description: |
+        For a profile linked to the wrong person, or someone who left the
+        Plex Home: forgets the link, ends their playback and any sign-in in
+        progress, and signs the token out at plex.tv (best effort). The
+        account or profile can then be linked again.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/settings/plex/section:
+    put:
+      tags: [Administration]
+      summary: Choose the Plex music library Leerr browses (null for the server's Plex Music library)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: [string, "null"], pattern: "^[0-9]{1,12}$" }
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/admin/plex/sections:
+    get:
+      tags: [Administration]
+      summary: The music libraries the administrator's own Plex sign-in can see
+      responses:
+        "200":
+          description: Libraries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, selected]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, title, agent, scanner]
+                      properties:
+                        key: { type: string }
+                        title: { type: string }
+                        agent: { type: string, description: "`tv.plex.agents.music` gives albums their MusicBrainz ids." }
+                        scanner: { type: string }
+                  selected: { type: [string, "null"] }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 
   /api/v1/admin/settings/lidarr:
     put:
@@ -366,7 +481,7 @@ paths:
       description: |
         With it, members connect Last.fm with only a username, everyone gets Last.fm
         cover art in search, and people without a Last.fm profile get suggestions
-        seeded from the album artists in their own Jellyfin library.
+        seeded from the album artists in their own Plex library.
       requestBody:
         required: true
         content:
@@ -413,7 +528,7 @@ paths:
   /api/v1/admin/status:
     get:
       tags: [Administration]
-      summary: Health of Jellyfin, Lidarr, the acquisition worker and backups
+      summary: Health of Plex, Lidarr, the acquisition worker and backups
       description: Service probes are cached for about 10 seconds.
       responses:
         "200":
@@ -422,9 +537,9 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [jellyfin, lidarr, lidarrReady, worker, acquisitions, streams, startedAt, lastBackup]
+                required: [plex, lidarr, lidarrReady, worker, acquisitions, streams, startedAt, lastBackup]
                 properties:
-                  jellyfin: { $ref: "#/components/schemas/Probe" }
+                  plex: { $ref: "#/components/schemas/Probe" }
                   lidarr: { $ref: "#/components/schemas/Probe" }
                   lidarrReady: { type: boolean }
                   worker:
@@ -530,7 +645,7 @@ paths:
     get:
       tags: [Connections]
       summary: The current user's service connections
-      description: Checks the saved Jellyfin sign-in with Jellyfin, so this can take a moment.
+      description: Checks the saved Plex sign-in with the Plex server, so this can take a moment.
       responses:
         "200":
           description: Connections
@@ -538,38 +653,102 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [jellyfinConfigured, jellyfin, jellyfinValid, lastfm, lastfmKeyProvided, lidarrConfigured, lidarrReady]
+                required: [plexConfigured, plex, plexValid, lastfm, lastfmKeyProvided, lidarrConfigured, lidarrReady]
                 properties:
-                  jellyfinConfigured: { type: boolean, description: An administrator has set the Jellyfin URL. }
-                  jellyfin: { type: [string, "null"], description: Connected Jellyfin username. }
-                  jellyfinValid:
+                  plexConfigured: { type: boolean, description: An administrator has set the Plex server address. }
+                  plex:
+                    description: The linked Plex account, or null.
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        required: [username, managed]
+                        properties:
+                          username: { type: string }
+                          managed: { type: boolean, description: A managed Plex Home profile, linked by a full member of the Home. }
+                  plexValid:
                     type: [boolean, "null"]
-                    description: Whether Jellyfin still accepts the saved sign-in; null when not connected or Jellyfin could not be asked.
+                    description: Whether the Plex server still accepts the saved sign-in; null when not linked or Plex could not be asked.
                   lastfm: { type: [string, "null"], description: Connected Last.fm username. }
                   lastfmKeyProvided: { type: boolean, description: The installation has a Last.fm API key, so a username is enough. }
                   lidarrConfigured: { type: boolean }
                   lidarrReady: { type: boolean }
 
-  /api/v1/connections/jellyfin:
-    put:
+  /api/v1/connections/plex/links:
+    post:
       tags: [Connections]
-      summary: Sign in to Jellyfin; only the resulting token is stored (encrypted)
-      description: Leerr signs in as a device of its own per Leerr user. Five wrong passwords lock this for 15 minutes; it is also limited to 10 per 15 minutes per person.
+      summary: Start signing in to Plex with your own Plex account, on Plex's own page
+      description: |
+        Leerr creates a Plex sign-in (a strong PIN) for this person and
+        session and returns Plex's page to send the browser to; the person
+        approves it there, and Plex sends them back to Leerr's Connections
+        page. No Plex password ever reaches Leerr. Managed Home profiles are
+        linked by an administrator instead (`POST
+        /api/v1/admin/users/{id}/plex/links`). A new sign-in replaces any
+        earlier one. Limited to 10 per 15 minutes per person; 502 or 503 when
+        plex.tv cannot create the sign-in.
+      responses:
+        "200": { $ref: "#/components/responses/PlexLinkStarted" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/v1/connections/plex/links/{id}:
+    get:
+      tags: [Connections]
+      summary: Where a Plex sign-in stands
+      description: |
+        Polled by the page; Leerr asks plex.tv at most every two seconds.
+        `linked`: done. `choose_profile`: pick a managed profile next.
+        `no_access`: the Plex account cannot reach this server. `no_profiles`:
+        the Plex Home has no managed profiles. `in_use`: that Plex account or
+        profile already belongs to another Leerr user. `expired`: start again.
+        Only the session that started the sign-in can follow it. When plex.tv
+        does not answer, the sign-in stays `waiting` and the next poll asks
+        again. 409 `settings_changed` or `plex_not_configured` when the Plex
+        server changed or was removed meanwhile.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
+      responses:
+        "200": { $ref: "#/components/responses/PlexLink" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+
+  /api/v1/connections/plex/links/{id}/profile:
+    post:
+      tags: [Connections]
+      summary: Link one of the Plex Home's managed profiles
+      description: |
+        Only managed profiles listed by the sign-in can be chosen. Leerr keeps
+        that profile's own sign-in, never the member's. A wrong profile PIN
+        gets 403 and the choice stays open; so does a plex.tv failure (502 or
+        503). 409 `plex_link_state` when the sign-in is no longer choosing a
+        profile (for example it expired). Limited to 10 per 15 minutes per
+        person.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, password]
+              required: [uuid]
               properties:
-                username: { type: string }
-                password: { type: string }
+                uuid: { type: string }
+                pin: { type: string, pattern: "^[0-9]{0,8}$", description: The profile's PIN, when it has one. }
       responses:
-        "200": { $ref: "#/components/responses/Empty" }
+        "200": { $ref: "#/components/responses/PlexLink" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 
   /api/v1/connections/lastfm:
     put:
@@ -595,20 +774,20 @@ paths:
       tags: [Connections]
       summary: Disconnect a service
       parameters:
-        - { name: service, in: path, required: true, schema: { type: string, enum: [jellyfin, lastfm] } }
+        - { name: service, in: path, required: true, schema: { type: string, enum: [plex, lastfm] } }
       responses:
         "200": { $ref: "#/components/responses/Empty" }
 
   /api/v1/library:
     get:
       tags: [Library]
-      summary: A page of albums visible to the user's Jellyfin account
+      summary: A page of albums visible to the user's Plex account
       parameters:
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 60 } }
         - { name: q, in: query, schema: { type: string, maxLength: 200 } }
         - { name: sort, in: query, schema: { type: string, enum: [title, artist, year, added], default: title } }
-        - { name: artist, in: query, description: A Jellyfin album-artist id, schema: { type: string } }
+        - { name: artist, in: query, description: A Plex album-artist id, schema: { type: string, pattern: "^[0-9]{1,12}$" } }
         - { name: favorites, in: query, schema: { type: string, enum: ["0", "1"], default: "0" } }
       responses:
         "200":
@@ -626,7 +805,7 @@ paths:
   /api/v1/library/artists:
     get:
       tags: [Library]
-      summary: Album artists visible to the user's Jellyfin account, by name
+      summary: Album artists visible to the user's Plex account, by name
       parameters:
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
@@ -673,7 +852,7 @@ paths:
   /api/v1/playlists:
     get:
       tags: [Library]
-      summary: The user's Jellyfin music playlists
+      summary: The user's Plex music playlists
       responses:
         "200":
           description: Playlists
@@ -726,7 +905,8 @@ paths:
   /api/v1/favorites/{id}:
     put:
       tags: [Library]
-      summary: Mark an album or track as a favourite in Jellyfin
+      summary: Mark an album or track as a favourite in Plex
+      description: A favourite is Plex's five-star rating, the one Plexamp and Plex Web show; it replaces any other rating.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -734,7 +914,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       tags: [Library]
-      summary: Remove an album or track from the favourites in Jellyfin
+      summary: Remove an album or track from the favourites in Plex
+      description: Clears the rating, but only when it is five stars; another rating is left alone.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -744,7 +925,7 @@ paths:
   /api/v1/playback:
     post:
       tags: [Library]
-      summary: Report playback to Jellyfin (play counts, "recently played", scrobbler plugins)
+      summary: Report playback to Plex ("now playing", play counts, history)
       requestBody:
         required: true
         content:
@@ -758,13 +939,20 @@ paths:
                 position: { type: number, minimum: 0, description: Seconds into the track. }
                 paused: { type: boolean, default: false }
       responses:
-        "200": { $ref: "#/components/responses/Empty" }
+        "200":
+          description: Reported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stop: { type: string, description: Plex ended this playback (for example its owner stopped it); the player should stop and show this. }
         "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/artwork/{id}:
     get:
       tags: [Library]
-      summary: Artwork of an album, artist or playlist through the user's Jellyfin access
+      summary: Artwork of an album, artist or playlist through the user's Plex access
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: size, in: query, description: "small: 192 px, medium: 512 px, large: 1024 px", schema: { type: string, enum: [small, medium, large], default: medium } }
@@ -795,18 +983,22 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [url, expiresAt]
+                required: [url, expiresAt, transcoded]
                 properties:
                   url: { type: string }
                   expiresAt: { type: string, format: date-time }
+                  transcoded:
+                    type: boolean
+                    description: Browsers cannot play the original (e.g. ALAC), so Plex converts it to MP3. Such a stream has no Range support; seek by requesting `?start=<seconds>`.
 
   /api/v1/streams/{ticket}:
     get:
       tags: [Library]
-      summary: The original audio file, with Range support
+      summary: The original audio file with Range support, or Plex's MP3 conversion of it
       security: []
       parameters:
         - { name: ticket, in: path, required: true, schema: { type: string } }
+        - { name: start, in: query, description: "Seconds to start a converted stream at; originals use Range instead.", schema: { type: number, minimum: 0, maximum: 86400 } }
         - { name: Range, in: header, schema: { type: string } }
         - { name: If-Range, in: header, schema: { type: string } }
       responses:
@@ -919,9 +1111,9 @@ paths:
       summary: Suggested albums not already owned or requested
       description: |
         `source` says where they come from: the user's Last.fm profile, the album
-        artists in their Jellyfin library (with the installation's Last.fm key),
+        artists in their Plex library (with the installation's Last.fm key),
         or recent albums on MusicBrainz. Withheld (409/5xx) when the user's
-        Jellyfin library cannot be read to filter owned albums.
+        Plex library cannot be read to filter owned albums.
       parameters:
         - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
       responses:
@@ -987,9 +1179,9 @@ paths:
                 properties:
                   libraryChecked:
                     type: boolean
-                    description: False when Jellyfin could not be read, so availability is unknown.
+                    description: False when Plex could not be read, so availability is unknown.
                   library:
-                    description: Album counts in the user's library; albums without a MusicBrainz release-group id cannot be matched to requests.
+                    description: Album counts in the user's library; albums Plex has not matched to a MusicBrainz release cannot be matched to requests.
                     oneOf:
                       - type: "null"
                       - type: object
@@ -1001,7 +1193,7 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [id, releaseGroupMBID, releaseMBID, title, artist, status, unseen, reason, retryable, albumID, requestedAt, updatedAt]
+                      required: [id, releaseGroupMBID, releaseMBID, title, artist, status, unseen, reason, retryable, albumID, unmatchedAlbumID, requestedAt, updatedAt]
                       properties:
                         id: { type: string, format: uuid }
                         releaseGroupMBID: { type: string, format: uuid }
@@ -1011,13 +1203,20 @@ paths:
                         status:
                           oneOf:
                             - $ref: "#/components/schemas/AcquisitionStatus"
-                            - { type: string, const: available, description: In this user's Jellyfin library. }
+                            - { type: string, const: available, description: In this user's Plex library. }
                         unseen:
                           type: boolean
                           description: An outcome (available, failed, attention) this person has not marked seen yet; drives the Requests badge.
                         reason: { type: [string, "null"] }
                         retryable: { type: boolean }
                         albumID: { type: [string, "null"] }
+                        unmatchedAlbumID:
+                          type: [string, "null"]
+                          description: |
+                            For an imported request: a Plex album with the same artist and
+                            title that Plex matched to no MusicBrainz release, or to another
+                            album's. It has arrived, but Leerr cannot confirm it until it is
+                            fixed in Plex (Fix Match).
                         requestedAt: { type: string, format: date-time }
                         updatedAt: { type: string, format: date-time, description: When the status or reason last changed. }
 
@@ -1088,6 +1287,40 @@ components:
       content:
         application/json:
           schema: { type: object, maxProperties: 0 }
+    PlexLinkStarted:
+      description: Sign-in started
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [id, authURL, expiresAt]
+            properties:
+              id: { type: string, description: Opaque; only this session can use it. }
+              authURL: { type: string, description: "Plex's sign-in page (https://app.plex.tv/auth#?…)." }
+              expiresAt: { type: string, format: date-time }
+    PlexLink:
+      description: Where the Plex sign-in stands
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [state, mode, username, profiles, expiresAt]
+            properties:
+              state: { type: string, enum: [waiting, choose_profile, linked, expired, no_access, no_profiles, in_use] }
+              mode: { type: string, enum: [own, managed] }
+              username:
+                type: [string, "null"]
+                description: While waiting or choosing a profile, the Plex account that approved the sign-in; once linked, the linked account or managed profile.
+              profiles:
+                type: array
+                items:
+                  type: object
+                  required: [uuid, name, protected]
+                  properties:
+                    uuid: { type: string }
+                    name: { type: string }
+                    protected: { type: boolean, description: The profile has a PIN. }
+              expiresAt: { type: string, format: date-time }
     Error:
       description: Error
       content:
@@ -1137,21 +1370,22 @@ components:
         change could not be confirmed, a download is stuck, or Leerr hit an error; retryable.
     Album:
       type: object
-      required: [id, title, artist, artistID, artistMBID, year, releaseGroupMBID, releaseMBID, hasArtwork, favorite]
+      required: [id, title, artist, artistID, artistMBID, year, releaseGroupMBID, releaseMBID, hasArtwork, favorite, available]
       properties:
         id: { type: string }
         title: { type: string }
         artist: { type: string, description: The album artist. }
-        artistID: { type: [string, "null"], description: Jellyfin album-artist id, for filtering the library. }
-        artistMBID: { type: [string, "null"], description: MusicBrainz album-artist id, for the artist's discography. }
+        artistID: { type: [string, "null"], description: Plex album-artist id, for filtering the library. }
+        artistMBID: { type: [string, "null"], description: MusicBrainz album-artist id, for the artist's discography; on album pages only. }
         year: { type: [integer, "null"] }
-        releaseGroupMBID: { type: [string, "null"] }
-        releaseMBID: { type: [string, "null"] }
+        releaseGroupMBID: { type: [string, "null"], description: Known once Leerr has looked the release up on MusicBrainz. }
+        releaseMBID: { type: [string, "null"], description: The MusicBrainz release (edition) Plex matched. }
         hasArtwork: { type: boolean }
-        favorite: { type: boolean }
+        favorite: { type: boolean, description: Five stars in Plex. }
+        available: { type: boolean, description: False for albums in Plex's trash, which cannot play. }
     Track:
       type: object
-      required: [id, title, artist, albumID, albumTitle, disc, number, duration, codec, sampleRate, bitDepth, favorite]
+      required: [id, title, artist, albumID, albumTitle, disc, number, duration, codec, sampleRate, bitDepth, favorite, available]
       properties:
         id: { type: string }
         title: { type: string }
@@ -1165,15 +1399,17 @@ components:
         sampleRate: { type: [number, "null"] }
         bitDepth: { type: [integer, "null"] }
         favorite: { type: boolean }
+        available: { type: boolean, description: False for tracks in Plex's trash. }
     Playlist:
       type: object
-      required: [id, name, tracks, duration, hasArtwork]
+      required: [id, name, tracks, duration, hasArtwork, smart]
       properties:
         id: { type: string }
         name: { type: string }
         tracks: { type: [integer, "null"] }
         duration: { type: [number, "null"], description: Seconds. }
         hasArtwork: { type: boolean }
+        smart: { type: boolean, description: Plex fills smart playlists from rules; tracks cannot be added to them. }
     Candidate:
       type: object
       required: [id, title, artist, artistMBID, year, date, primaryType, secondaryTypes, coverUrl, status, albumID]
@@ -1188,7 +1424,7 @@ components:
         secondaryTypes: { type: array, items: { type: string }, description: e.g. Live, Compilation. }
         coverUrl: { type: [string, "null"] }
         status: { type: [string, "null"], enum: [available, requested, null] }
-        albumID: { type: [string, "null"], description: The Jellyfin album when it is in the caller's library. }
+        albumID: { type: [string, "null"], description: The Plex album when it is in the caller's library. }
     CandidatePage:
       type: object
       required: [items, total]

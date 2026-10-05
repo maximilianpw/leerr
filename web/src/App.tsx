@@ -21,8 +21,8 @@ type Boot =
   | { phase: "signedOut"; fixturePreview: boolean; notice: string }
   | { phase: "signedIn"; fixturePreview: boolean; user: User };
 
-// Earlier releases also kept "leerr.requests.seen." keys; they are swept away too.
-const personalPrefixes = [storagePrefix, "leerr.requests.seen."];
+// Earlier releases kept "leerr.player." queues and "leerr.requests.seen." keys; they are swept away too.
+const personalPrefixes = [storagePrefix, "leerr.player.", "leerr.requests.seen."];
 
 /**
  * Nothing of one person's listening may linger for the next person in this
@@ -173,7 +173,7 @@ function SignedIn({
       user,
       fixturePreview,
       signOut: async () => {
-        // While the session still exists: Jellyfin hears that the track stopped.
+        // While the session still exists: Plex hears that the track stopped.
         await Promise.race([controller.halt(), new Promise((resolve) => setTimeout(resolve, 2_000))]);
         try {
           await send("/sessions/current", "DELETE");

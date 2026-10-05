@@ -65,6 +65,7 @@ const track = (id: string, duration = 200): Track => ({
   sampleRate: 44_100,
   bitDepth: 16,
   favorite: false,
+  available: true,
 });
 const tracks = ["t1", "t2", "t3", "t4"].map((id) => track(id));
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -79,7 +80,7 @@ function memoryStorage() {
   };
 }
 
-function setup(options: { storage?: ReturnType<typeof memoryStorage>; probe?: string | null } = {}) {
+function setup(options: { storage?: ReturnType<typeof memoryStorage>; probe?: string | null; transcoded?: Set<string>; stop?: string } = {}) {
   const audio = new FakeAudio();
   const tickets: string[] = [];
   const reports: Array<{ event: PlaybackEvent; trackID: string; position: number }> = [];
@@ -90,14 +91,21 @@ function setup(options: { storage?: ReturnType<typeof memoryStorage>; probe?: st
     ticket: async (trackID) => {
       tickets.push(trackID);
       if (held) await new Promise<void>((resolve) => held?.push(resolve));
-      return { url: `/api/v1/streams/${trackID}-${tickets.length}`, expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString() };
+      return {
+        url: `/api/v1/streams/${trackID}-${tickets.length}`,
+        expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
+        transcoded: options.transcoded?.has(trackID) ?? false,
+      };
     },
-    report: (event, trackID, position) => void reports.push({ event, trackID, position }),
+    report: async (event, trackID, position) => {
+      reports.push({ event, trackID, position });
+      return event === "stop" ? null : (options.stop ?? null);
+    },
     probe: async () => options.probe ?? null,
     storage: options.storage ?? null,
     now: () => clock.now,
   };
-  const controller = new PlaybackController(audio, services, options.storage ? "leerr.player.u1" : null);
+  const controller = new PlaybackController(audio, services, options.storage ? "leerr.queue.u1" : null);
   controller.attach();
   return {
     audio,
@@ -116,7 +124,7 @@ function setup(options: { storage?: ReturnType<typeof memoryStorage>; probe?: st
   };
 }
 
-test("playing a queue loads the chosen track with its own ticket and reports it to Jellyfin", async () => {
+test("playing a queue loads the chosen track with its own ticket and reports it to Plex", async () => {
   const s = setup();
   s.controller.playQueue(tracks, 1);
   await settle();
@@ -252,7 +260,7 @@ test("the end of the queue stops, repeat-all wraps around and repeat-one restart
 test("Previous on a restored queue restarts the saved track without loading it", () => {
   const storage = memoryStorage();
   storage.setItem(
-    "leerr.player.u1",
+    "leerr.queue.u1",
     JSON.stringify({ v: 1, queue: tracks, original: [0, 1, 2, 3], index: 1, position: 73, shuffle: false, repeat: "off" }),
   );
   const s = setup({ storage });
@@ -294,6 +302,24 @@ test("tracks can be queued next or last, moved and removed without interrupting 
   s.controller.removeAt(0);
   await settle();
   assert.equal(s.controller.getState().current?.id, "x2", "removing the playing track plays the next one");
+});
+
+test("tracks in Plex's trash are left out of every queue", async () => {
+  const s = setup();
+  const mixed = [track("t1"), { ...track("t2"), available: false }, track("t3"), { ...track("t4"), available: false }];
+  const ids = () => s.controller.getState().queue.map((item) => item.id);
+  s.controller.playQueue(mixed, 1);
+  await settle();
+  assert.deepEqual(s.tickets, [], "a trashed track cannot be started");
+  s.controller.playQueue(mixed, 2);
+  await settle();
+  assert.deepEqual(ids(), ["t1", "t3"]);
+  assert.equal(s.controller.getState().current?.id, "t3");
+  s.controller.enqueue([{ ...track("x1"), available: false }], "next");
+  assert.deepEqual(ids(), ["t1", "t3"]);
+  s.controller.playShuffled(mixed);
+  await settle();
+  assert.deepEqual(ids().sort(), ["t1", "t3"]);
 });
 
 test("Shuffle play starts anywhere in the list, not always on the first track", async () => {
@@ -392,8 +418,8 @@ test("the queue survives a reload paused at the same place, and only plays when 
   first.clock.now = 10_000;
   first.audio.emit("timeupdate");
   first.controller.pageHidden();
-  assert.ok(storage.values.get("leerr.player.u1"));
-  assert.equal(storage.values.get("leerr.player.u1")?.includes("/api/v1/streams/"), false, "tickets are never stored");
+  assert.ok(storage.values.get("leerr.queue.u1"));
+  assert.equal(storage.values.get("leerr.queue.u1")?.includes("/api/v1/streams/"), false, "tickets are never stored");
   const second = setup({ storage });
   const state = second.controller.getState();
   assert.equal(state.current?.id, "t2");
@@ -405,28 +431,72 @@ test("the queue survives a reload paused at the same place, and only plays when 
   assert.equal(second.audio.currentTime, 73);
   assert.equal(second.controller.getState().playing, true);
   second.controller.stop();
-  assert.equal(storage.values.has("leerr.player.u1"), false);
-  storage.values.set("leerr.player.u1", "{not json");
+  assert.equal(storage.values.has("leerr.queue.u1"), false);
+  storage.values.set("leerr.queue.u1", "{not json");
   assert.equal(setup({ storage }).controller.getState().current, null, "a broken saved queue is ignored");
 });
 
-test("progress is reported every 30 seconds while playing, and on pause", async () => {
+test("progress is reported every 10 seconds while playing, as Plex expects, and on pause", async () => {
   const s = setup();
   s.controller.playQueue(tracks, 0);
   await settle();
-  s.audio.currentTime = 10;
-  s.clock.now = 10_000;
+  s.audio.currentTime = 4;
+  s.clock.now = 4_000;
   s.audio.emit("timeupdate");
-  s.audio.currentTime = 31;
-  s.clock.now = 31_000;
+  s.audio.currentTime = 11;
+  s.clock.now = 11_000;
   s.audio.emit("timeupdate");
   s.audio.pause();
   assert.deepEqual(
     s.reports.map((report) => [report.event, report.position]),
     [
       ["start", 0],
-      ["progress", 31],
-      ["progress", 31],
+      ["progress", 11],
+      ["progress", 11],
     ],
   );
+});
+
+test("a track Plex converts is seeked by starting the conversion again, and its position keeps the track's clock", async () => {
+  const s = setup({ transcoded: new Set(["t2"]) });
+  s.controller.playQueue(tracks, 1);
+  await settle();
+  const url = s.audio.src;
+  assert.equal(url, "/api/v1/streams/t2-1");
+  s.controller.seek(120);
+  assert.equal(s.audio.src, `${url}?start=120`, "a new conversion from 120 s, on the same ticket");
+  assert.equal(s.tickets.filter((id) => id === "t2").length, 1);
+  assert.equal(s.controller.getPosition(), 120);
+  // The converted stream's own clock starts at 0.
+  s.audio.currentTime = 5;
+  s.clock.now = 20_000;
+  s.audio.emit("timeupdate");
+  assert.equal(s.controller.getPosition(), 125);
+  assert.deepEqual(s.reports.at(-1), { event: "progress", trackID: "t2", position: 125 });
+  s.audio.duration = 40;
+  s.audio.emit("durationchange");
+  assert.equal(s.controller.getState().duration, 200, "the track's length stays, not the remaining conversion's");
+  s.controller.next();
+  await settle();
+  assert.deepEqual(s.reports.filter((report) => report.event === "stop").at(-1), { event: "stop", trackID: "t2", position: 125 });
+  assert.equal(s.audio.src, "/api/v1/streams/t3-2", "the next track is an original, from its prefetched ticket");
+});
+
+test("a restored queue resumes a converted track by asking for its saved position", async () => {
+  const storage = memoryStorage();
+  storage.setItem("leerr.queue.u1", JSON.stringify({ v: 1, queue: tracks, original: [0, 1, 2, 3], index: 1, position: 73, shuffle: false, repeat: "off" }));
+  const s = setup({ storage, transcoded: new Set(["t2"]) });
+  s.controller.toggle();
+  await settle();
+  assert.equal(s.audio.src, "/api/v1/streams/t2-1?start=73");
+  assert.equal(s.controller.getPosition(), 73);
+});
+
+test("when Plex ends a playback, the player stops and says why", async () => {
+  const s = setup({ stop: "The server owner stopped this stream." });
+  s.controller.playQueue(tracks, 0);
+  await settle();
+  await settle();
+  assert.equal(s.audio.paused, true);
+  assert.equal(s.controller.getState().error, "The server owner stopped this stream.");
 });

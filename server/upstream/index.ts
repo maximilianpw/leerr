@@ -1,20 +1,23 @@
 import { UpstreamError } from "./errors.ts";
 import { HttpClient, type Fetcher } from "./http.ts";
 import {
-  Jellyfin,
+  Plex,
   type AlbumDetail,
   type AlbumPage,
   type ArtistPage,
   type Artwork,
   type ArtworkSize,
-  type JellyfinAccess,
-  type JellyfinAccount,
+  type LibraryContents,
   type LibraryQuery,
-  type PlaybackEvent,
+  type PlayableTrack,
+  type PlexAccess,
+  type PlexIdentity,
+  type PlexSection,
   type Playlist,
   type PlaylistDetail,
-  type Track,
-} from "./jellyfin.ts";
+  type TimelineReport,
+} from "./plex.ts";
+import { PlexTV, type PlexAccount, type PlexPin, type PlexProfile } from "./plextv.ts";
 import { Lastfm, type LastfmAccount, type LastfmAlbum } from "./lastfm.ts";
 import {
   Lidarr,
@@ -38,8 +41,11 @@ import {
 import { Notifier, type Notification, type NotifyTarget } from "./notify.ts";
 
 export { UpstreamError, validateEndpoint, type MutationOutcome } from "./errors.ts";
-export { artworkSizes, librarySorts } from "./jellyfin.ts";
-export type * from "./jellyfin.ts";
+export { artworkSizes, librarySorts, ratingKey } from "./plex.ts";
+export { pinExpired } from "./plextv.ts";
+export { PartialReleaseLookup } from "./musicbrainz.ts";
+export type * from "./plex.ts";
+export type * from "./plextv.ts";
 export type * from "./lastfm.ts";
 export type * from "./lidarr.ts";
 export type * from "./musicbrainz.ts";
@@ -56,26 +62,32 @@ export type RecommendationSeed =
 
 /** Every external service Leerr talks to. Tests substitute a fake implementation. */
 export interface Upstreams {
-  jellyfinVersion(endpoint: string): Promise<string>;
-  jellyfinLogin(endpoint: string, username: string, password: string, deviceID: string): Promise<JellyfinAccount>;
-  jellyfinTokenValid(access: JellyfinAccess): Promise<boolean>;
-  jellyfinLibrary(access: JellyfinAccess, query: LibraryQuery): Promise<AlbumPage>;
-  jellyfinArtists(access: JellyfinAccess, offset: number, limit: number, q: string): Promise<ArtistPage>;
-  jellyfinAlbum(access: JellyfinAccess, albumID: string): Promise<AlbumDetail>;
-  jellyfinPlaylists(access: JellyfinAccess): Promise<Playlist[]>;
-  jellyfinPlaylist(access: JellyfinAccess, playlistID: string): Promise<PlaylistDetail>;
-  jellyfinAddToPlaylist(access: JellyfinAccess, playlistID: string, trackIDs: string[]): Promise<void>;
-  jellyfinFavorite(access: JellyfinAccess, itemID: string, favorite: boolean): Promise<void>;
-  jellyfinReport(access: JellyfinAccess, event: PlaybackEvent, trackID: string, position: number, paused: boolean): Promise<void>;
-  jellyfinTrack(access: JellyfinAccess, trackID: string): Promise<Track>;
-  jellyfinArtwork(access: JellyfinAccess, itemID: string, size: ArtworkSize, signal?: AbortSignal): Promise<Artwork>;
-  jellyfinStream(
-    access: JellyfinAccess,
-    trackID: string,
-    range: string | undefined,
-    ifRange: string | undefined,
-    signal: AbortSignal,
-  ): Promise<Response>;
+  plexIdentity(endpoint: string): Promise<PlexIdentity>;
+  plexCreatePin(clientID: string, deviceName: string): Promise<PlexPin>;
+  plexCheckPin(clientID: string, pinID: number): Promise<string | null>;
+  plexAccount(clientID: string, accountToken: string): Promise<PlexAccount>;
+  plexServerToken(clientID: string, accountToken: string, machineID: string): Promise<string | null>;
+  plexProfiles(clientID: string, accountToken: string): Promise<PlexProfile[]>;
+  plexSwitchProfile(clientID: string, accountToken: string, uuid: string, pin: string): Promise<string>;
+  plexSignOut(clientID: string, accountToken: string): Promise<void>;
+  plexPing(clientID: string, accountToken: string): Promise<void>;
+  plexTokenValid(access: PlexAccess): Promise<boolean>;
+  plexSections(access: PlexAccess): Promise<PlexSection[]>;
+  plexLibrary(access: PlexAccess, query: LibraryQuery): Promise<AlbumPage>;
+  plexArtists(access: PlexAccess, offset: number, limit: number, q: string): Promise<ArtistPage>;
+  plexAlbum(access: PlexAccess, albumID: string): Promise<AlbumDetail>;
+  plexLibraryIndex(access: PlexAccess): Promise<LibraryContents>;
+  plexPlaylists(access: PlexAccess): Promise<Playlist[]>;
+  plexPlaylist(access: PlexAccess, playlistID: string): Promise<PlaylistDetail>;
+  plexAddToPlaylist(access: PlexAccess, playlistID: string, trackIDs: string[]): Promise<void>;
+  plexFavorite(access: PlexAccess, itemID: string, favorite: boolean): Promise<void>;
+  /** Returns Plex's reason when it ended playback (for example an administrator stopped it). */
+  plexReport(access: PlexAccess, report: TimelineReport): Promise<string | null>;
+  plexTrack(access: PlexAccess, trackID: string, signal?: AbortSignal): Promise<PlayableTrack>;
+  plexArtwork(access: PlexAccess, itemID: string, size: ArtworkSize, signal?: AbortSignal): Promise<Artwork>;
+  plexStream(access: PlexAccess, track: PlayableTrack, range: string | undefined, ifRange: string | undefined, signal: AbortSignal): Promise<Response>;
+  plexTranscode(access: PlexAccess, track: PlayableTrack, offset: number, session: string, signal: AbortSignal): Promise<Response>;
+  plexStopTranscode(access: PlexAccess, session: string): Promise<void>;
 
   lidarrVersion(access: LidarrAccess): Promise<string>;
   lidarrOptions(access: LidarrAccess): Promise<LidarrOptions>;
@@ -97,6 +109,8 @@ export interface Upstreams {
   /** Studio albums by any of these artists first released on or after `since` (YYYY-MM-DD). */
   newReleases(artistMBIDs: string[], since: string): Promise<AlbumCandidate[]>;
   editions(releaseGroupMBID: string): Promise<EditionList>;
+  /** Release → release group; unknown releases map to null, and ids over the call's budget are left out. */
+  releaseGroupsOf(releaseMBIDs: string[]): Promise<Map<string, string | null>>;
   identity(releaseGroupMBID: string, releaseMBID: string, artistMBID: string): Promise<Identity>;
   recommendations(seed: RecommendationSeed): Promise<AlbumCandidate[]>;
 
@@ -135,7 +149,8 @@ function withCovers(items: AlbumCandidate[], albums: LastfmAlbum[], matchArtist:
 }
 
 export class LiveUpstreams implements Upstreams {
-  readonly #jellyfin: Jellyfin;
+  readonly #plex: Plex;
+  readonly #plextv: PlexTV;
   readonly #lidarr: Lidarr;
   readonly #musicbrainz: MusicBrainz;
   readonly #lastfm: Lastfm;
@@ -143,60 +158,88 @@ export class LiveUpstreams implements Upstreams {
 
   constructor(fetcher: Fetcher = fetch) {
     const http = new HttpClient(fetcher);
-    this.#jellyfin = new Jellyfin(http);
+    this.#plex = new Plex(http);
+    this.#plextv = new PlexTV(http);
     this.#lidarr = new Lidarr(http);
     this.#musicbrainz = new MusicBrainz(http);
     this.#lastfm = new Lastfm(http);
     this.#notifier = new Notifier(http);
   }
 
-  jellyfinVersion(endpoint: string) {
-    return this.#jellyfin.version(endpoint);
+  plexIdentity(endpoint: string) {
+    return this.#plex.identity(endpoint);
   }
-  jellyfinLogin(endpoint: string, username: string, password: string, deviceID: string) {
-    return this.#jellyfin.login(endpoint, username, password, deviceID);
+  plexCreatePin(clientID: string, deviceName: string) {
+    return this.#plextv.createPin(clientID, deviceName);
   }
-  jellyfinTokenValid(access: JellyfinAccess) {
-    return this.#jellyfin.tokenValid(access);
+  plexCheckPin(clientID: string, pinID: number) {
+    return this.#plextv.checkPin(clientID, pinID);
   }
-  jellyfinLibrary(access: JellyfinAccess, query: LibraryQuery) {
-    return this.#jellyfin.library(access, query);
+  plexAccount(clientID: string, accountToken: string) {
+    return this.#plextv.account(clientID, accountToken);
   }
-  jellyfinArtists(access: JellyfinAccess, offset: number, limit: number, q: string) {
-    return this.#jellyfin.artists(access, offset, limit, q);
+  plexServerToken(clientID: string, accountToken: string, machineID: string) {
+    return this.#plextv.serverToken(clientID, accountToken, machineID);
   }
-  jellyfinAlbum(access: JellyfinAccess, albumID: string) {
-    return this.#jellyfin.album(access, albumID);
+  plexProfiles(clientID: string, accountToken: string) {
+    return this.#plextv.managedProfiles(clientID, accountToken);
   }
-  jellyfinPlaylists(access: JellyfinAccess) {
-    return this.#jellyfin.playlists(access);
+  plexSwitchProfile(clientID: string, accountToken: string, uuid: string, pin: string) {
+    return this.#plextv.switchProfile(clientID, accountToken, uuid, pin);
   }
-  jellyfinPlaylist(access: JellyfinAccess, playlistID: string) {
-    return this.#jellyfin.playlist(access, playlistID);
+  plexSignOut(clientID: string, accountToken: string) {
+    return this.#plextv.signOut(clientID, accountToken);
   }
-  jellyfinAddToPlaylist(access: JellyfinAccess, playlistID: string, trackIDs: string[]) {
-    return this.#jellyfin.addToPlaylist(access, playlistID, trackIDs);
+  plexPing(clientID: string, accountToken: string) {
+    return this.#plextv.ping(clientID, accountToken);
   }
-  jellyfinFavorite(access: JellyfinAccess, itemID: string, favorite: boolean) {
-    return this.#jellyfin.favorite(access, itemID, favorite);
+  plexTokenValid(access: PlexAccess) {
+    return this.#plex.tokenValid(access);
   }
-  jellyfinReport(access: JellyfinAccess, event: PlaybackEvent, trackID: string, position: number, paused: boolean) {
-    return this.#jellyfin.report(access, event, trackID, position, paused);
+  plexSections(access: PlexAccess) {
+    return this.#plex.sections(access);
   }
-  jellyfinTrack(access: JellyfinAccess, trackID: string) {
-    return this.#jellyfin.track(access, trackID);
+  plexLibrary(access: PlexAccess, query: LibraryQuery) {
+    return this.#plex.library(access, query);
   }
-  jellyfinArtwork(access: JellyfinAccess, itemID: string, size: ArtworkSize, signal?: AbortSignal) {
-    return this.#jellyfin.artwork(access, itemID, size, signal);
+  plexArtists(access: PlexAccess, offset: number, limit: number, q: string) {
+    return this.#plex.artists(access, offset, limit, q);
   }
-  jellyfinStream(
-    access: JellyfinAccess,
-    trackID: string,
-    range: string | undefined,
-    ifRange: string | undefined,
-    signal: AbortSignal,
-  ) {
-    return this.#jellyfin.stream(access, trackID, range, ifRange, signal);
+  plexAlbum(access: PlexAccess, albumID: string) {
+    return this.#plex.album(access, albumID);
+  }
+  plexLibraryIndex(access: PlexAccess) {
+    return this.#plex.libraryIndex(access);
+  }
+  plexPlaylists(access: PlexAccess) {
+    return this.#plex.playlists(access);
+  }
+  plexPlaylist(access: PlexAccess, playlistID: string) {
+    return this.#plex.playlist(access, playlistID);
+  }
+  plexAddToPlaylist(access: PlexAccess, playlistID: string, trackIDs: string[]) {
+    return this.#plex.addToPlaylist(access, playlistID, trackIDs);
+  }
+  plexFavorite(access: PlexAccess, itemID: string, favorite: boolean) {
+    return this.#plex.favorite(access, itemID, favorite);
+  }
+  plexReport(access: PlexAccess, report: TimelineReport) {
+    return this.#plex.report(access, report);
+  }
+  plexTrack(access: PlexAccess, trackID: string, signal?: AbortSignal) {
+    return this.#plex.track(access, trackID, signal);
+  }
+  plexArtwork(access: PlexAccess, itemID: string, size: ArtworkSize, signal?: AbortSignal) {
+    return this.#plex.artwork(access, itemID, size, signal);
+  }
+  plexStream(access: PlexAccess, track: PlayableTrack, range: string | undefined, ifRange: string | undefined, signal: AbortSignal) {
+    return this.#plex.stream(access, track, range, ifRange, signal);
+  }
+  plexTranscode(access: PlexAccess, track: PlayableTrack, offset: number, session: string, signal: AbortSignal) {
+    return this.#plex.transcode(access, track, offset, session, signal);
+  }
+  plexStopTranscode(access: PlexAccess, session: string) {
+    return this.#plex.stopTranscode(access, session);
   }
 
   lidarrVersion(access: LidarrAccess) {
@@ -285,6 +328,9 @@ export class LiveUpstreams implements Upstreams {
 
   editions(releaseGroupMBID: string) {
     return this.#musicbrainz.editions(releaseGroupMBID);
+  }
+  releaseGroupsOf(releaseMBIDs: string[]) {
+    return this.#musicbrainz.releaseGroupsOf(releaseMBIDs);
   }
   identity(releaseGroupMBID: string, releaseMBID: string, artistMBID: string) {
     return this.#musicbrainz.identity(releaseGroupMBID, releaseMBID, artistMBID);

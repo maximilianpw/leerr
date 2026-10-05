@@ -85,6 +85,16 @@ const MIGRATIONS: ReadonlyArray<{ to: number; sql: string }> = [
       ALTER TABLE acquisitions ADD COLUMN pinEdition INTEGER NOT NULL DEFAULT 0 CHECK(pinEdition IN (0,1));
       ALTER TABLE acquisitions ADD COLUMN notified TEXT;
       ALTER TABLE requests ADD COLUMN seenStatus TEXT;
+      -- Leerr moved from Jellyfin to Plex: Jellyfin sign-ins and the stream tickets for Jellyfin items go.
+      DELETE FROM secrets WHERE service='jellyfin';
+      DELETE FROM tickets;
+      ALTER TABLE users ADD COLUMN plexClientID TEXT;
+      -- Plex identifies albums by MusicBrainz release; requests are by release group.
+      CREATE TABLE releaseGroups(
+        releaseMBID TEXT PRIMARY KEY,
+        releaseGroupMBID TEXT,
+        checkedAt INTEGER NOT NULL
+      );
       CREATE INDEX requests_acquisition ON requests(acquisitionID);
       CREATE TABLE devices(
         id TEXT PRIMARY KEY,
@@ -169,7 +179,11 @@ export const notifyFormats = ["ntfy", "discord", "json"] as const;
 export type NotifyFormat = (typeof notifyFormats)[number];
 // Fields added after the first release need defaults: older settings blobs lack them.
 export const settingsSchema = z.object({
-  jellyfinURL: z.string().nullable(),
+  plexURL: z.string().nullable().default(null),
+  /** The server the address answered as when it was saved; tokens are only ever sent to it. */
+  plexMachineID: z.string().nullable().default(null),
+  /** The music library to browse; null uses the server's Plex Music library. */
+  plexSection: z.string().nullable().default(null),
   lidarrURL: z.string().nullable(),
   lidarrKey: z.string(),
   rootFolderPath: z.string(),
@@ -184,7 +198,9 @@ export const settingsSchema = z.object({
 });
 export type Settings = z.infer<typeof settingsSchema>;
 export const emptySettings: Settings = {
-  jellyfinURL: null,
+  plexURL: null,
+  plexMachineID: null,
+  plexSection: null,
   lidarrURL: null,
   lidarrKey: "",
   rootFolderPath: "",
@@ -202,15 +218,30 @@ export const lidarrReady = (settings: Settings) =>
   !!settings.rootFolderPath &&
   settings.qualityProfileID > 0 &&
   settings.metadataProfileID > 0;
-export const jellyfinSecret = z.object({ token: z.string(), userID: z.string(), username: z.string() });
+/**
+ * One person's Plex link. The account token is only sent to plex.tv (to check
+ * the link and fetch a new server token); the server only ever sees the server token.
+ */
+export const plexSecret = z.object({
+  accountToken: z.string(),
+  serverToken: z.string(),
+  machineID: z.string(),
+  username: z.string(),
+  /** The plex.tv account (or managed profile) id: one Plex account belongs to one Leerr user. */
+  uuid: z.string().default(""),
+  /** A managed Home profile, linked by a full member of the Home. */
+  managed: z.boolean(),
+});
+export type PlexLink = z.infer<typeof plexSecret>;
 export const lastfmSecret = z.object({ username: z.string(), apiKey: z.string() });
-export type Service = "settings" | "jellyfin" | "lastfm";
+export type Service = "settings" | "plex" | "lastfm";
 const INSTALLATION = "installation";
 type SqlValue = string | number | null;
 const TAG_LENGTH = 16;
 const NONCE_LENGTH = 12;
 const count = z.object({ count: z.number() });
 export const DEVICE_LIFETIME = 365 * 86_400_000;
+const UNKNOWN_RELEASE_RETRY = 7 * 86_400_000;
 const DEVICES_PER_USER = 20;
 
 export type StoreOptions = {
@@ -447,6 +478,12 @@ export class Store {
   deleteServiceSecrets(service: Service) {
     this.db.prepare("DELETE FROM secrets WHERE service=? AND owner<>?").run(service, INSTALLATION);
   }
+  /** The users who hold a credential for a service. */
+  secretOwners(service: Service): string[] {
+    return z
+      .array(z.string())
+      .parse(this.db.prepare("SELECT owner FROM secrets WHERE service=? AND owner<>?").pluck().all(service, INSTALLATION));
+  }
   settings(): Settings {
     return this.secret(INSTALLATION, "settings", settingsSchema) ?? emptySettings;
   }
@@ -463,6 +500,51 @@ export class Store {
   setupRequired(): boolean {
     return !this.db.prepare("SELECT 1 FROM users LIMIT 1").get();
   }
+  /**
+   * The person's X-Plex-Client-Identifier, created on first use. Random rather
+   * than derived from the user id: plex.tv only reveals a PIN's token to the
+   * client identifier that created it.
+   */
+  plexClientID(userID: string): string {
+    const existing = z.string().nullable().optional().parse(this.db.prepare("SELECT plexClientID FROM users WHERE id=?").pluck().get(userID));
+    if (existing) return existing;
+    const created = `leerr-${randomBytes(16).toString("hex")}`;
+    this.db.prepare("UPDATE users SET plexClientID=? WHERE id=? AND plexClientID IS NULL").run(created, userID);
+    return z.string().parse(this.db.prepare("SELECT plexClientID FROM users WHERE id=?").pluck().get(userID));
+  }
+
+  // MusicBrainz release → release group, shared by everyone's library index
+
+  /**
+   * Known groups for these releases. A release MusicBrainz did not know is
+   * remembered as null for a week, then asked about again.
+   */
+  releaseGroups(releaseMBIDs: string[], now: number): Map<string, string | null> {
+    const known = new Map<string, string | null>();
+    const rows = z.array(z.object({ releaseMBID: z.string(), releaseGroupMBID: z.string().nullable(), checkedAt: z.number() }));
+    const lookup = this.db.prepare("SELECT releaseMBID, releaseGroupMBID, checkedAt FROM releaseGroups WHERE releaseMBID=?");
+    // Editions Leerr requested are known without asking MusicBrainz.
+    const requested = this.db.prepare("SELECT releaseGroupMBID FROM acquisitions WHERE releaseMBID=?").pluck();
+    for (const id of releaseMBIDs) {
+      const [row] = rows.parse(lookup.all(id));
+      if (row && (row.releaseGroupMBID || now - row.checkedAt < UNKNOWN_RELEASE_RETRY)) {
+        known.set(id, row.releaseGroupMBID);
+        continue;
+      }
+      const group = z.string().optional().parse(requested.get(id));
+      if (group) known.set(id, group);
+    }
+    return known;
+  }
+  saveReleaseGroups(groups: Map<string, string | null>, now: number) {
+    const save = this.db.prepare(
+      "INSERT INTO releaseGroups(releaseMBID, releaseGroupMBID, checkedAt) VALUES(?,?,?) ON CONFLICT(releaseMBID) DO UPDATE SET releaseGroupMBID=excluded.releaseGroupMBID, checkedAt=excluded.checkedAt",
+    );
+    this.transaction(() => {
+      for (const [release, group] of groups) save.run(release, group, now);
+    });
+  }
+
   user(id: string): User | undefined {
     return userRow.optional().parse(this.db.prepare("SELECT * FROM users WHERE id=?").get(id));
   }

@@ -4,7 +4,7 @@ import { errorCode, errorMessage, isAbort, request, requestsSchema, sendInBackgr
 export type Resource<T> = {
   data: T | null;
   error: string;
-  /** The API error code behind `error`, e.g. "jellyfin_not_connected". */
+  /** The API error code behind `error`, e.g. "plex_not_connected". */
   code: string | null;
   loading: boolean;
   reload: () => void;
@@ -143,7 +143,7 @@ export function useRequestUpdates(enabled: boolean): number {
         });
     };
     poll();
-    // Every 5 minutes at most: each poll may walk the Jellyfin library.
+    // Every 5 minutes at most: each poll may walk the Plex library.
     const timer = setInterval(poll, 5 * 60_000);
     document.addEventListener("visibilitychange", poll);
     return () => {

@@ -3,13 +3,13 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
-import { audio } from "../testing.ts";
+import { audio, plexIDs } from "../testing.ts";
 import { harness } from "./harness.ts";
 
 async function ticket(h: Awaited<ReturnType<typeof harness>>) {
   h.configure();
   const admin = await h.user("root", "admin", "admin");
-  const issued = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: "tone" })).json();
+  const issued = (await h.call("POST", "/api/v1/stream-tickets", admin, { trackID: plexIDs.track })).json();
   return { admin, url: String(issued.url) };
 }
 
@@ -28,11 +28,11 @@ test("streams return exact full and ranged bytes as sandboxed audio", async (t) 
   assert.equal((await h.call("GET", url, null, undefined, { range: `bytes=${audio.length}-` })).status, 416);
 });
 
-test("tickets need the ticket owner's Jellyfin access and expire only for new requests", async (t) => {
+test("tickets need the ticket owner's Plex access and expire only for new requests", async (t) => {
   const h = await harness(t);
   const { url } = await ticket(h);
   const stranger = await h.user("sam");
-  assert.equal((await h.call("POST", "/api/v1/stream-tickets", stranger, { trackID: "tone" })).status, 409);
+  assert.equal((await h.call("POST", "/api/v1/stream-tickets", stranger, { trackID: plexIDs.track })).status, 409);
   assert.equal((await h.call("GET", "/api/v1/streams/not-a-ticket")).status, 400);
   h.clock.advance(6 * 3_600_000 - 1);
   assert.equal((await h.call("GET", url)).status, 200);
@@ -45,7 +45,7 @@ test("revoking the session aborts a live stream and invalidates its ticket", asy
   const { admin, url } = await ticket(h);
   let aborted = false;
   // Hold the upstream body open until the client or server aborts it.
-  h.upstream.jellyfinStream = async (_access, _track, _range, _ifRange, signal) =>
+  h.upstream.plexStream = async (_access, _track, _range, _ifRange, signal) =>
     new Response(
       new ReadableStream({
         start(controller) {
@@ -76,7 +76,7 @@ test("a session may hold at most four concurrent streams", async (t) => {
   const h = await harness(t);
   const { url } = await ticket(h);
   const pending: Array<() => void> = [];
-  h.upstream.jellyfinStream = async () =>
+  h.upstream.plexStream = async () =>
     new Response(
       new ReadableStream({
         start(controller) {
@@ -107,18 +107,18 @@ test("a session may hold at most four concurrent streams", async (t) => {
 test("unexpected upstream content types are served as opaque bytes", async (t) => {
   const h = await harness(t);
   const { url } = await ticket(h);
-  h.upstream.jellyfinStream = async () =>
+  h.upstream.plexStream = async () =>
     new Response("<script>alert(1)</script>", { headers: { "content-type": "text/html" } });
   const response = await h.call("GET", url);
   assert.equal(response.headers["content-type"], "application/octet-stream");
   assert.equal(response.headers["content-disposition"], "inline");
 });
 
-/** A Jellyfin body that stays open until released or aborted. */
+/** A Plex body that stays open until released or aborted. */
 function heldStream(h: Awaited<ReturnType<typeof harness>>) {
   const finishers: Array<() => void> = [];
   const state = { aborted: 0, finishers };
-  h.upstream.jellyfinStream = async (_access, _track, _range, _ifRange, signal) =>
+  h.upstream.plexStream = async (_access, _track, _range, _ifRange, signal) =>
     new Response(
       new ReadableStream({
         start(controller) {
@@ -165,7 +165,7 @@ test("finished streams free their slots, and a started stream outlives its ticke
   for (let wait = 0; wait < 50 && h.context.streams.size; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(h.context.streams.size, 0, "every slot was released");
   // The freed slots admit a fresh ticket's stream straight away.
-  const fresh = (await h.call("POST", "/api/v1/stream-tickets", { ...(await h.login("root")) }, { trackID: "tone" })).json();
+  const fresh = (await h.call("POST", "/api/v1/stream-tickets", { ...(await h.login("root")) }, { trackID: plexIDs.track })).json();
   const next = await openStream(address, fresh.url);
   assert.equal(next.statusCode, 200);
   next.resume();
@@ -187,14 +187,14 @@ test("shutting down does not wait for open streams, and admits no new ones", asy
   assert.equal(h.context.streams.open("any-session"), null);
 });
 
-test("a listener leaving before Jellyfin answers is not logged as a server error", async (t) => {
+test("a listener leaving before Plex answers is not logged as a server error", async (t) => {
   const h = await harness(t);
   const { url } = await ticket(h);
   let started = () => {};
   const waiting = new Promise<void>((resolve) => {
     started = resolve;
   });
-  h.upstream.jellyfinStream = async (_access, _track, _range, _ifRange, signal) => {
+  h.upstream.plexStream = async (_access, _track, _range, _ifRange, signal) => {
     started();
     await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
     throw new Error("unreachable");
