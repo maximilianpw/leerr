@@ -45,6 +45,7 @@ runs worker passes until nothing is due.
 | `streams.test.ts` | Range/416, ticket admission, revocation aborting live streams, stream limits and slot release, shutdown with open streams |
 | `upstream.test.ts` | Wire contracts for Lidarr, MusicBrainz, Last.fm and notification targets against stub `fetch` |
 | `plex.test.ts` | Wire contracts for the Plex Media Server and plex.tv (sign-in, server tokens, Home profiles) against stub `fetch` |
+| `plex-races.test.ts` | Concurrent Plex sign-ins, link invalidation, administrator demotion and server/account changes during token renewal |
 | `store.test.ts` | Encryption, schema migrations, compare-and-set updates, deployment settings, backups, the operator CLI (restore, running-server detection) |
 | `static.test.ts` | Web asset caching, install files and the single-page-app fallback |
 | `contract.test.ts` | Every API route matches `docs/openapi.yaml` in both directions, and every documented operation is called and its JSON response validated against its schema |

@@ -75,22 +75,34 @@ export function connectionRoutes(app: FastifyInstance, context: AppContext) {
     log("connection_failed", { user: link.targetUserID, service: "plex", reason });
   }
 
+  /** Recheck both authority and ownership after upstream I/O; forgotten links must never come back. */
+  function requireCurrentLink(request: FastifyRequest, link: PendingLink) {
+    const { user, session } = auth.require(request, link.mode === "managed");
+    if (context.plexLinks.get(link.id, user.id, session.id, context.now()) !== link)
+      throw new APIError(404, "not_found", "This Plex sign-in is not in progress. Start again.");
+  }
+
   /**
    * Saves the link once the account is known to reach this server, and ends
    * the pending sign-in. A throw leaves it as it was, so it can be retried.
    */
-  async function finish(link: PendingLink, accountToken: string, username: string, uuid: string, managed: boolean): Promise<void> {
+  async function finish(request: FastifyRequest, link: PendingLink, accountToken: string, username: string, uuid: string, managed: boolean): Promise<void> {
     // One Plex account per Leerr user: otherwise one person's plays, loves and playlists land in another's account.
     if (linkedElsewhere(uuid, link.targetUserID)) return fail(link, "in_use");
     const settings = store.settings();
     const machineID = settings.plexMachineID;
     if (!settings.plexURL || !machineID) throw plexNotConfigured();
     const serverToken = await upstream.plexServerToken(link.clientID, accountToken, machineID);
+    requireCurrentLink(request, link);
+    if (link.state !== (link.mode === "own" ? "waiting" : "choose_profile"))
+      throw new APIError(409, "plex_link_state", "This Plex sign-in is no longer waiting. Start again.");
     if (!serverToken) return fail(link, "no_access");
     // The server may have been changed, or the person removed, while the sign-in was on plex.tv.
     if (store.settings().plexMachineID !== machineID)
       throw new APIError(409, "settings_changed", "The Plex server changed meanwhile. Start again.");
     if (!store.user(link.targetUserID)) throw notFound("User");
+    // No awaits between this check and the write: concurrent completions cannot claim the same account.
+    if (linkedElsewhere(uuid, link.targetUserID)) return fail(link, "in_use");
     store.putSecret(link.targetUserID, "plex", JSON.stringify({ accountToken, serverToken, machineID, username, uuid, managed }));
     link.state = "linked";
     link.memberToken = null;
@@ -107,7 +119,7 @@ export function connectionRoutes(app: FastifyInstance, context: AppContext) {
     // Shown on Plex's consent page, so a sign-in someone else started is recognisable.
     const deviceName = `Leerr (${target.username})`;
     const pin = await upstream.plexCreatePin(clientID, deviceName);
-    auth.require(request);
+    auth.require(request, mode === "managed");
     const link = context.plexLinks.create(
       { userID: starter.id, sessionID, targetUserID: target.id, clientID, pinID: pin.id, mode, expiresAt: pin.expiresAt },
       context.now(),
@@ -162,17 +174,20 @@ export function connectionRoutes(app: FastifyInstance, context: AppContext) {
     const { id } = linkParam.parse(request.params);
     const link = context.plexLinks.get(id, user.id, session.id, context.now());
     if (!link) throw new APIError(404, "not_found", "This Plex sign-in is not in progress. Start again.");
+    requireCurrentLink(request, link);
     if (link.state !== "waiting" || context.now() - link.checkedAt < CHECK_SPACING) return linkView(link);
     link.checkedAt = context.now();
     try {
       const token = await upstream.plexCheckPin(link.clientID, link.pinID);
       if (!token) return linkView(link);
       const account = await upstream.plexAccount(link.clientID, token);
-      auth.require(request);
+      requireCurrentLink(request, link);
       link.username = account.username;
-      if (link.mode === "own") await finish(link, token, account.username, account.uuid, account.restricted);
+      if (link.mode === "own") await finish(request, link, token, account.username, account.uuid, account.restricted);
       else {
         const profiles = await upstream.plexProfiles(link.clientID, token);
+        requireCurrentLink(request, link);
+        if (link.state !== "waiting") return linkView(link);
         link.profiles = profiles;
         link.state = profiles.length ? "choose_profile" : "no_profiles";
         link.memberToken = profiles.length ? token : null;
@@ -197,6 +212,7 @@ export function connectionRoutes(app: FastifyInstance, context: AppContext) {
       const body = z.object({ uuid: z.string().min(1).max(100), pin: z.string().regex(/^\d{0,8}$/).default("") }).parse(request.body);
       const link = context.plexLinks.get(id, user.id, session.id, context.now());
       if (!link) throw new APIError(404, "not_found", "This Plex sign-in is not in progress. Start again.");
+      requireCurrentLink(request, link);
       const memberToken = link.memberToken;
       if (link.state !== "choose_profile" || !memberToken)
         throw new APIError(409, "plex_link_state", "Choose a profile only after signing in with Plex.");
@@ -206,8 +222,8 @@ export function connectionRoutes(app: FastifyInstance, context: AppContext) {
       const profileToken = await upstream.plexSwitchProfile(link.clientID, memberToken, profile.uuid, body.pin);
       const account = await upstream.plexAccount(link.clientID, profileToken);
       if (!account.restricted) throw new APIError(400, "invalid_request", "Choose one of the listed profiles.");
-      auth.require(request);
-      await finish(link, profileToken, profile.name, account.uuid, true);
+      requireCurrentLink(request, link);
+      await finish(request, link, profileToken, profile.name, account.uuid, true);
       return linkView(link);
     },
   );

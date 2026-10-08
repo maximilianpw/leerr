@@ -125,13 +125,29 @@ export async function withPlex<T>(
   sessionID?: string,
 ): Promise<T> {
   const access = plexAccess(context, userID, sessionID);
+  const link = context.store.secret(userID, "plex", plexSecret);
+  // A renewal belongs to this account on this server, not whatever link the user has after an await.
+  const requireCurrentAccess = () => {
+    const settings = context.store.settings();
+    const current = context.store.secret(userID, "plex", plexSecret);
+    if (
+      !link || !current || current.accountToken !== link.accountToken || current.uuid !== link.uuid ||
+      current.machineID !== access.machineID || settings.plexMachineID !== access.machineID ||
+      settings.plexURL !== access.endpoint || settings.plexSection !== access.section
+    )
+      throw new APIError(409, "plex_not_connected", "Your Plex connection changed meanwhile. Try again.");
+    return current;
+  };
   await confirmServer(context, access);
+  requireCurrentAccess();
   try {
     return await work(access);
   } catch (cause) {
     if (!(cause instanceof UpstreamError && cause.code === "plex_reconnect")) throw cause;
+    requireCurrentAccess();
     const renewed = await renewServerToken(context, userID, access.token);
-    if (!renewed) throw cause;
+    const current = requireCurrentAccess();
+    if (!renewed || renewed !== current.serverToken) throw cause;
     return work({ ...access, token: renewed });
   }
 }
@@ -156,6 +172,7 @@ async function renewServerToken(context: AppContext, userID: string, failed: str
 async function fetchServerToken(context: AppContext, userID: string, failed: string): Promise<string | null> {
   const link = context.store.secret(userID, "plex", plexSecret);
   if (!link) return null;
+  const settings = context.store.settings();
   let token: string | null;
   try {
     token = await context.upstream.plexServerToken(context.store.plexClientID(userID), link.accountToken, link.machineID);
@@ -167,7 +184,12 @@ async function fetchServerToken(context: AppContext, userID: string, failed: str
   }
   // Re-read: the person may have disconnected or signed in again meanwhile.
   const current = context.store.secret(userID, "plex", plexSecret);
-  if (!token || token === failed || !current || current.accountToken !== link.accountToken) return null;
+  const currentSettings = context.store.settings();
+  if (
+    !token || token === failed || !current || current.accountToken !== link.accountToken ||
+    current.machineID !== link.machineID || current.uuid !== link.uuid ||
+    currentSettings.plexMachineID !== settings.plexMachineID || currentSettings.plexURL !== settings.plexURL
+  ) return null;
   context.store.putSecret(userID, "plex", JSON.stringify({ ...current, serverToken: token }));
   context.log("plex_token_renewed", { user: userID });
   return token;
