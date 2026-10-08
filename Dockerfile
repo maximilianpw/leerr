@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS build
+FROM node:25-bookworm-slim AS build
 WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
@@ -12,7 +12,7 @@ RUN npm run build \
  && npm prune --omit=dev \
  && rm -rf server/test server/testing.ts server/preview.ts server/fixtures
 
-FROM node:24-bookworm-slim
+FROM node:25-bookworm-slim
 ENV NODE_ENV=production PORT=3000 LEERR_DATA=/data
 WORKDIR /app
 COPY --from=build /app/package.json ./
