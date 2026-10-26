@@ -1,5 +1,5 @@
 import { ChevronRight, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { artworkURL, connectionsSchema, coverArtURL, request, requestsSchema, send, type RequestItem } from "../api.ts";
 import { markRequestsSeen, useAction, useResource } from "../hooks.ts";
 import { Link } from "../router.tsx";
@@ -13,6 +13,13 @@ export function RequestsPage() {
   const requests = useResource((signal) => request("/requests", requestsSchema, { signal }), []);
   const connections = useResource((signal) => request("/connections", connectionsSchema, { signal }), []);
   const items = requests.data?.items ?? [];
+  const [filter, setFilter] = useState("all");
+  const visible = items.filter((item) => {
+    if (filter === "ready") return item.status === "available";
+    if (filter === "attention") return item.status === "failed" || item.status === "attention" || Boolean(item.unmatchedAlbumID);
+    if (filter === "active") return inProgress(item);
+    return true;
+  });
   const active = items.some(inProgress);
   const { reload } = requests;
 
@@ -38,6 +45,7 @@ export function RequestsPage() {
       <Title text="Requests" />
       <header className="top">
         <div>
+          <span className="eyebrow">From discovery to the first play</span>
           <h1 tabIndex={-1}>Requests</h1>
           <p>Follow each album from request to your library.</p>
         </div>
@@ -76,21 +84,31 @@ export function RequestsPage() {
       {plex && !plex.lidarrReady && (
         <Notice>Lidarr isn't fully set up yet, so new requests wait until an administrator finishes it.</Notice>
       )}
+      <div className="requestJourney" aria-label="How requests work">
+        <span><b>01</b> Choose an edition</span><ChevronRight aria-hidden="true" />
+        <span><b>02</b> Lidarr finds your music</span><ChevronRight aria-hidden="true" />
+        <span><b>03</b> Play it from Plex</span>
+      </div>
+      <div className="segmented requestFilters" role="group" aria-label="Filter requests">
+        {[{ id: "all", label: "All requests" }, { id: "active", label: "In progress" }, { id: "ready", label: "Ready to play" }, { id: "attention", label: "Needs attention" }].map((entry) => (
+          <button type="button" key={entry.id} aria-pressed={filter === entry.id} onClick={() => setFilter(entry.id)}>{entry.label}{entry.id === "all" ? ` (${items.length})` : ""}</button>
+        ))}
+      </div>
       <SectionState
         loading={requests.loading}
         error={requests.error}
-        empty={!items.length}
+        empty={!visible.length}
         retry={reload}
         stale
-        emptyTitle="No requests yet"
+        emptyTitle={items.length ? "Nothing in this view" : "No requests yet"}
         emptyText={
-          <>
+          items.length ? "Your requests will appear here when their status changes. Choose All requests to see everything." : <>
             Find an album in <Link to="/discover">Discover</Link> and request it.
           </>
         }
       >
         <ul className="requestList">
-          {items.map((item) => (
+          {visible.map((item) => (
             <RequestRow key={item.id} item={item} changed={reload} />
           ))}
         </ul>

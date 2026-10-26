@@ -52,6 +52,12 @@ class PreviewUpstreams extends FakeUpstreams {
       ),
     ];
     this.libraries.set("admin-plex-token", albums);
+    // Discovery uses fictional MusicBrainz IDs too: keep its artwork local,
+    // rather than making doomed Cover Art Archive requests for sample releases.
+    this.candidates = this.candidates.map((item, index) => ({
+      ...item,
+      coverUrl: `/api/v1/artwork/${110 + index}?size=large`,
+    }));
   }
   /** Five tracks per album, numbered album id × 10 + n; the last of "Frequencies" is in Plex's trash. */
   override async plexAlbum(access: PlexAccess, albumID: string): Promise<AlbumDetail> {

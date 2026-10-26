@@ -40,21 +40,21 @@ export function AuthPage({
       <section className="authIntro" aria-hidden="true">
         <Brand />
         <h2>
-          Find albums.
+          Good music.
           <br />
-          Request them.
-          <br />
-          Play them.
+          Great company.
         </h2>
-        <p>Discover music, request it for your Plex library, and listen anywhere.</p>
+        <p>A place for the records you love.<br />Discover, collect, and listen together.</p>
+        <div className="authRecord"><span className="vinyl" /><span className="recordLabel">leerr<br /><small>THE PERSONAL COLLECTION</small></span></div>
       </section>
       <main className="authCard">
         <Brand />
-        <h1>{mode === "setup" ? "Set up Leerr" : "Sign in"}</h1>
+        <span className="eyebrow">Your listening room</span>
+        <h1>{mode === "setup" ? "Set up Leerr" : "Welcome back."}</h1>
         <p className="muted">
           {mode === "setup"
             ? "Create the first administrator. The setup token is in the setup-token file in Leerr's data directory."
-            : "Welcome back."}
+            : "Sign in and pick up where you left off."}
         </p>
         {notice && <Notice>{notice}</Notice>}
         <form onSubmit={submit}>

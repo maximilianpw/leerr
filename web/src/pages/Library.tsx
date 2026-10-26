@@ -29,7 +29,12 @@ const notConnected = new Set(["plex_not_connected", "plex_not_configured", "plex
 
 export function LibraryPage({ view }: { view: LibraryView }) {
   return (
-    <div className="page">
+    <div className="page libraryPage">
+      <header className="collectionHeader">
+        <span className="eyebrow">Collected, not just saved</span>
+        <h1 tabIndex={-1}>Your library</h1>
+        <p>The records you come back to. All together, all yours.</p>
+      </header>
       <nav className="tabs" aria-label="Library views">
         {views.map((entry) => (
           <Link key={entry.id} to={entry.to} current={entry.id === view}>
@@ -102,7 +107,7 @@ function Albums() {
       <Title text={artistID ? `Albums by ${artistName}` : "Library"} />
       <header className="top">
         <div>
-          <h1 tabIndex={-1}>{artistID ? artistName : "Library"}</h1>
+          <h2>{artistID ? artistName : favorites ? "Favourite albums" : "All albums"}</h2>
           <p>
             {first.data
               ? `${total} ${total === 1 ? describe.replace("albums", "album") : describe}${q ? ` matching “${q}”` : ""}.`
@@ -141,7 +146,6 @@ function Albums() {
           </button>
         )}
       </div>
-      {!q && !artistID && !favorites && sort === "title" && <RecentlyAdded />}
       {first.error && !first.data ? (
         <ConnectionState code={first.code} message={first.error} />
       ) : (
@@ -255,8 +259,8 @@ function AlbumGrid({ items }: { items: Album[] }) {
   );
 }
 
-function RecentlyAdded() {
-  const recent = useResource((signal) => request("/library?limit=12&sort=added", libraryPageSchema, { signal }), []);
+export function RecentlyAdded() {
+  const recent = useResource((signal) => request("/library?limit=6&sort=added", libraryPageSchema, { signal }), []);
   if (!recent.data?.items.length) return null;
   return (
     <section className="shelf" aria-labelledby="recent-heading">
@@ -294,7 +298,7 @@ function Artists() {
       <Title text="Artists" />
       <header className="top">
         <div>
-          <h1 tabIndex={-1}>Artists</h1>
+          <h2>Artists</h2>
           <p>
             {!artists.data ? "Album artists in your library." : q ? `${count} ${noun} matching “${q}”.` : `${count} ${noun} in your library.`}
           </p>
@@ -350,7 +354,7 @@ function Playlists() {
       <Title text="Playlists" />
       <header className="top">
         <div>
-          <h1 tabIndex={-1}>Playlists</h1>
+          <h2>Playlists</h2>
           <p>Your Plex music playlists.</p>
         </div>
       </header>

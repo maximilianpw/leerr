@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronRight, Disc3, RefreshCw, Search, UserRound, UsersRound, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, ChevronRight, Disc3, RefreshCw, Search, UserRound, UsersRound, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   albumTypes,
@@ -17,6 +17,7 @@ import {
 import { useAction, useResource } from "../hooks.ts";
 import { goBack, Link, navigate, useLocation } from "../router.tsx";
 import { ArtSkeleton, Artwork, ErrorBox, SectionState, Spinner, Title } from "../ui.tsx";
+import { RecentlyAdded } from "./Library.tsx";
 
 type Filter = "all" | "artists" | "albums";
 const typeLabels: Record<AlbumType, string> = { studio: "Studio albums", ep: "EPs", live: "Live", compilation: "Compilations", all: "Everything" };
@@ -45,7 +46,7 @@ export function DiscoverPage({ artistID }: { artistID: string | null }) {
     ? "Releases from MusicBrainz. Choose one to pick an edition and request it."
     : q
       ? "Artists and albums from MusicBrainz matching every word."
-      : "Albums you might like. Choose one to pick an edition and request it.";
+      : "A new favourite is waiting to be found.";
   const mark = (items: Candidate[]) =>
     items.map((item) => (requested.has(item.id) && !item.status ? { ...item, status: "requested" as const } : item));
   const grid = { onSelect: setSelected, mark };
@@ -55,6 +56,7 @@ export function DiscoverPage({ artistID }: { artistID: string | null }) {
       <Title text={title} />
       <header className="top">
         <div>
+          <span className="eyebrow">Explore your next obsession</span>
           <h1 tabIndex={-1}>{title}</h1>
           <p>{intro}</p>
         </div>
@@ -77,8 +79,14 @@ export function DiscoverPage({ artistID }: { artistID: string | null }) {
         <SearchResults key={q} q={q} filter={filter} setFilter={setFilter} {...grid} />
       ) : (
         <>
-          <NewReleases {...grid} />
           <Recommendations {...grid} />
+          <RecentlyAdded />
+          <NewReleases {...grid} />
+          <div className="discoveryGuide">
+            <Disc3 aria-hidden="true" />
+            <div><h2>Find it. Make it yours.</h2><p>Search an album, choose your edition, and follow it all the way to your Plex library.</p></div>
+            <Link to="/requests">Follow your requests <ArrowRight aria-hidden="true" /></Link>
+          </div>
         </>
       )}
       {selected && (
@@ -239,6 +247,8 @@ function Recommendations({ onSelect, mark }: GridProps) {
     [refresh],
   );
   const source = result.data?.source;
+  const items = mark(result.data?.items ?? []);
+  const spotlight = items[0];
   const empty =
     result.data?.emptyReason === "all_excluded"
       ? "You already have or requested every suggestion. Search for something new."
@@ -248,10 +258,10 @@ function Recommendations({ onSelect, mark }: GridProps) {
           ? "No suggestions from the artists in your library yet. Try searching instead."
           : "Connect Last.fm in Settings for personal suggestions, or search above.";
   return (
-    <section aria-labelledby="suggestions-heading">
+    <section className="recommendations" aria-labelledby="suggestions-heading">
       <div className="toolbar">
         <div>
-          <h2 id="suggestions-heading">Suggestions</h2>
+          <h2 id="suggestions-heading">A little outside your rotation</h2>
           <p className="muted small">
             {source === "lastfm"
               ? "From artists similar to your Last.fm favourites."
@@ -273,7 +283,25 @@ function Recommendations({ onSelect, mark }: GridProps) {
         emptyText={empty}
         skeleton={<ArtSkeleton />}
       >
-        <CandidateGrid items={mark(result.data?.items ?? [])} onSelect={onSelect} />
+        {spotlight && (
+          <div className="discoverySpotlight">
+            <div className="spotlightCopy">
+              <span className="eyebrow">On your radar</span>
+              <h2>{spotlight.title}</h2>
+              <p className="spotlightArtist">{spotlight.artist}{spotlight.year ? ` / ${spotlight.year}` : ""}</p>
+              <p>Your next great discovery starts with an album.<br />Choose the edition that belongs in your collection.</p>
+              <button type="button" className="primary" onClick={() => onSelect(spotlight)}>
+                {spotlight.status === "available" ? "In your library" : spotlight.status === "requested" ? "View request" : "Explore album"} <ArrowRight aria-hidden="true" />
+              </button>
+            </div>
+            <button type="button" className="spotlightSleeve" aria-label={`Explore ${spotlight.title} by ${spotlight.artist}`} onClick={() => onSelect(spotlight)}>
+              <span className="vinyl" aria-hidden="true" />
+              <Artwork sources={[spotlight.coverUrl ?? "", coverArtURL("release-group", spotlight.id)]} />
+            </button>
+            <span className="spotlightFoot">DISCOVER SOMETHING THAT STAYS WITH YOU</span>
+          </div>
+        )}
+        {items.length > 1 && <CandidateGrid items={items.slice(1)} onSelect={onSelect} />}
       </SectionState>
     </section>
   );

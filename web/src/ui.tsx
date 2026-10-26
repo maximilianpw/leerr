@@ -1,4 +1,4 @@
-import { Disc3, LoaderCircle, Music2, X } from "lucide-react";
+import { Disc3, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
 import type { RequestStatus } from "./api.ts";
 import { useAction } from "./hooks.ts";
@@ -12,7 +12,7 @@ export function Brand() {
   return (
     <div className="brand">
       <div className="brandMark">
-        <Music2 aria-hidden="true" />
+        <Disc3 aria-hidden="true" />
       </div>
       <strong>leerr</strong>
     </div>

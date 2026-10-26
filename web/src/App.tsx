@@ -1,4 +1,4 @@
-import { Clock3, Compass, Library, LoaderCircle, LogOut, Settings } from "lucide-react";
+import { ArrowUpRight, Clock3, Compass, Disc3, Heart, Library, ListMusic, LoaderCircle, LogOut, Settings, UserRound } from "lucide-react";
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { ApiError, configureApi, errorMessage, meSchema, request, send, setupSchema, type User } from "./api.ts";
 import { useAction, useRequestUpdates } from "./hooks.ts";
@@ -266,7 +266,19 @@ function Shell() {
       </a>
       <aside className="sidebar">
         <Brand />
+        <p className="navCaption">Your listening room</p>
         {nav("sideNav")}
+        <div className="collectionNav">
+          <p className="navCaption">Your collection</p>
+          <Link to="/library"><Disc3 aria-hidden="true" /> Albums</Link>
+          <Link to="/library/artists"><UserRound aria-hidden="true" /> Artists</Link>
+          <Link to="/library?favorites=1"><Heart aria-hidden="true" /> Favourites</Link>
+          <Link to="/library/playlists"><ListMusic aria-hidden="true" /> Playlists</Link>
+        </div>
+        <Link to="/settings" className="sidebarNote">
+          <span>Made for your music.</span>
+          <small>Manage your connections <ArrowUpRight aria-hidden="true" /></small>
+        </Link>
         <div className="account">
           <Link to="/settings/account" className="profile" label={`${user.username}, account settings`}>
             <span className="avatar" aria-hidden="true">
@@ -290,6 +302,11 @@ function Shell() {
         {signOutAction.error && <ErrorBox message={signOutAction.error} />}
       </aside>
       <main id="content" ref={main} tabIndex={-1}>
+        <div className="appMasthead">
+          <Brand />
+          <span>THE PERSONAL MUSIC COLLECTION</span>
+          <Link to="/library">Your music, in good company <Disc3 aria-hidden="true" /></Link>
+        </div>
         {fixturePreview && <FixtureNotice />}
         <ErrorBoundary path={path}>
           <Routes path={path} />
