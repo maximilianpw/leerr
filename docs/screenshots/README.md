@@ -9,7 +9,7 @@ from the application. No product content was fabricated or composited.
 | --- | --- | --- |
 | `library.png` | Library sorted by Recently added | 1600 × 991 |
 | `album.png` | Human After All by Daft Punk, with track formats and durations | 1600 × 991 |
-| `discover.png` | New from your artists and Last.fm suggestions | 1600 × 991 |
+| `discover.png` | Featured Last.fm suggestion and further suggestions | 1600 × 917 |
 | `request-edition.png` | Homework edition picker | 1094 × 1400 |
 | `requests.png` | Existing failed requests with explanations and retry controls | 1600 × 991 |
 
@@ -30,6 +30,10 @@ from the application. No product content was fabricated or composited.
 The original window captures were 3024 × 1898 pixels. Landscape images use a
 2614 × 1620 crop starting at x=402, y=70. The edition image uses a 1360 × 1740
 crop starting at x=1030, y=100. Adjust these bounds for a different window size.
+
+`discover.png` was captured on October 29, 2026 at 3406 × 2416 pixels and uses
+a 3390 × 1942 crop starting at x=0, y=0. The crop ends above the Recently added
+row and the account area.
 
 The captures did not submit or retry requests, start playback, change favourites
 or playlists, or change server settings. The failed requests are existing state

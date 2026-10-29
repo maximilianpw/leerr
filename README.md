@@ -52,12 +52,12 @@ it or add it to a playlist.
 ![Human After All by Daft Punk, with playback controls and FLAC track details](docs/screenshots/album.png)
 
 <details>
-<summary>Discover new releases and Last.fm suggestions</summary>
+<summary>Discover albums from artists similar to your favourites</summary>
 
-Find new releases from artists in your library and suggestions based on your
-Last.fm favourites.
+Discover features an album from artists similar to your Last.fm favourites, with
+more suggestions below it. Open one to choose an edition and request it.
 
-![Discover page with new releases and suggestions from Last.fm](docs/screenshots/discover.png)
+![Discover page featuring Racing Mount Pleasant, with suggestions from Last.fm](docs/screenshots/discover.png)
 
 </details>
 
