@@ -227,13 +227,14 @@ require Plex Pass.
 | A request needs attention | Inspect Lidarr, then use **Settings → All requests**. See [day-to-day operations](docs/deployment.md#day-to-day). |
 
 <details>
-<summary>See how Leerr explains a failed request</summary>
+<summary>See how Leerr explains a request that needs attention</summary>
 
-The requests in this capture failed because Lidarr found nothing to download
-within a day. Leerr shows the reason and a retry action. Check Lidarr's indexers
+Each request shows how far it has got, from search to your library. In this
+capture, Lidarr grabbed a release of Watch the Throne but could not finish it.
+Leerr shows Lidarr's reason and a retry action. Check Lidarr's Activity queue
 before retrying.
 
-![Failed album requests with Lidarr's explanation and Retry buttons](docs/screenshots/requests.png)
+![Requests in the library, downloading and needing attention, with Lidarr's explanation and a Retry button](docs/screenshots/requests.png)
 
 </details>
 
