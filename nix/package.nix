@@ -25,7 +25,7 @@ in
         && lib.cleanSourceFilter path type;
     };
     nodejs = nodejs_24;
-    npmDepsHash = "sha256-NnWO1KyY0AcYa7mj763EuwdramtODisrlrgh1lhSlJA=";
+    npmDepsHash = "sha256-F9vfdgQruLknp3Au72yFGp0Zcgz0RALGtFUQbpIuc0A=";
     nativeBuildInputs = [makeWrapper];
 
     # Tests only: Oxlint's plugin needs several GiB of memory, so lint runs in
