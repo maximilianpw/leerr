@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@v32
       - name: npmDepsHash matches package-lock.json
         run: nix build ".#leerr.npmDeps" -L --no-link
 
